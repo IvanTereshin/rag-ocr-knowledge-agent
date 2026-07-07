@@ -16,6 +16,12 @@ Production API использует PostgreSQL, если задан `DATABASE_UR
 
 Секреты остаются зашифрованными через `APP_SECRET`; база не должна хранить raw API keys.
 
+## Schema migrations
+
+DDL хранится в `apps/api/migrations/*.sql` и применяется при старте `PostgresStore` в алфавитном порядке. Runner сначала создаёт bootstrap-таблицу `rag_ocr_schema_migrations`, затем выполняет новые SQL-файлы и записывает имя файла без `.sql` как version.
+
+Для контейнера Dockerfile копирует `apps/api/migrations` рядом с `dist`. Если нужен нестандартный путь, задайте `POSTGRES_MIGRATIONS_DIR`.
+
 ## Legacy migration
 
 Старые инсталляции могли хранить всё состояние в одной строке:
@@ -27,7 +33,7 @@ rag_ocr_app_state(id = 1, data jsonb)
 При первом запуске новая версия:
 
 1. создаёт нормализованные таблицы;
-2. если `rag_ocr_app_state` существует и новые таблицы пустые, переносит данные;
+2. если `rag_ocr_app_state` существует и все новые state-таблицы пустые, переносит данные;
 3. записывает migration marker `normalized-store-v1`;
 4. оставляет legacy table как read-only источник истории, не использует её для новых writes.
 

@@ -27,6 +27,7 @@ ENV WEB_DIST_DIR=/app/apps/web/dist
 COPY --from=api-build /app/apps/api/package*.json ./
 COPY --from=api-build /app/apps/api/node_modules ./node_modules
 COPY --from=api-build /app/apps/api/dist ./dist
+COPY --from=api-build /app/apps/api/migrations ./migrations
 COPY --from=web-build /app/apps/web/dist /app/apps/web/dist
 
 RUN mkdir -p /app/data

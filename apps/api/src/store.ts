@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs'
+import { basename, dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import postgres from 'postgres'
 
 export type UserRecord = {
@@ -116,6 +117,9 @@ const emptyStore: StoreData = {
   chunksByDocumentId: {},
 }
 
+const postgresMigrationsDir = process.env.POSTGRES_MIGRATIONS_DIR?.trim()
+  || join(dirname(fileURLToPath(import.meta.url)), '..', 'migrations')
+
 export interface AppStore {
   read(): Promise<StoreData>
   write(nextData: StoreData): Promise<void>
@@ -222,6 +226,26 @@ function optionalJson<T>(value: unknown): T | undefined {
 
 function jsonOrNull(sql: postgres.Sql | postgres.TransactionSql, value: unknown) {
   return value === undefined ? null : sql.json(value as postgres.JSONValue)
+}
+
+function listPostgresMigrationFiles() {
+  if (!existsSync(postgresMigrationsDir)) {
+    throw new Error(`PostgreSQL migrations directory not found: ${postgresMigrationsDir}`)
+  }
+
+  const migrations = readdirSync(postgresMigrationsDir)
+    .filter((fileName) => fileName.endsWith('.sql'))
+    .sort()
+    .map((fileName) => ({
+      version: basename(fileName, '.sql'),
+      path: join(postgresMigrationsDir, fileName),
+    }))
+
+  if (!migrations.length) {
+    throw new Error(`No PostgreSQL migration files found in ${postgresMigrationsDir}`)
+  }
+
+  return migrations
 }
 
 export class JsonStore implements AppStore {
@@ -418,130 +442,44 @@ export class PostgresStore implements AppStore {
       return
     }
 
-    await this.createNormalizedTables()
+    await this.createMigrationTable()
+    await this.applySchemaMigrations()
     await this.migrateLegacyState()
     this.initialized = true
   }
 
-  private async createNormalizedTables(): Promise<void> {
+  private async createMigrationTable(): Promise<void> {
     await this.sql`
       CREATE TABLE IF NOT EXISTS rag_ocr_schema_migrations (
         version text PRIMARY KEY,
         applied_at timestamptz NOT NULL DEFAULT now()
       )
     `
+  }
 
-    await this.sql`
-      CREATE TABLE IF NOT EXISTS rag_ocr_users (
-        id text PRIMARY KEY,
-        name text NOT NULL,
-        email text NOT NULL UNIQUE,
-        password_hash text NOT NULL,
-        password_salt text NOT NULL,
-        created_at text NOT NULL
-      )
-    `
+  private async applySchemaMigrations(): Promise<void> {
+    const migrations = listPostgresMigrationFiles()
 
-    await this.sql`
-      CREATE TABLE IF NOT EXISTS rag_ocr_sessions (
-        token_hash text PRIMARY KEY,
-        user_id text NOT NULL REFERENCES rag_ocr_users(id) ON DELETE CASCADE,
-        csrf_token_hash text,
-        expires_at text NOT NULL,
-        created_at text NOT NULL
-      )
-    `
+    for (const migration of migrations) {
+      const rows = await this.sql<{ version: string }[]>`
+        SELECT version
+        FROM rag_ocr_schema_migrations
+        WHERE version = ${migration.version}
+      `
 
-    await this.sql`
-      CREATE INDEX IF NOT EXISTS rag_ocr_sessions_user_id_idx
-      ON rag_ocr_sessions(user_id)
-    `
+      if (rows.length) {
+        continue
+      }
 
-    await this.sql`
-      CREATE TABLE IF NOT EXISTS rag_ocr_service_settings (
-        user_id text NOT NULL REFERENCES rag_ocr_users(id) ON DELETE CASCADE,
-        provider text NOT NULL,
-        enabled boolean NOT NULL,
-        label text NOT NULL,
-        base_url text NOT NULL,
-        model text NOT NULL,
-        secret jsonb,
-        proxy_secret jsonb,
-        validation jsonb,
-        updated_at text,
-        PRIMARY KEY (user_id, provider)
-      )
-    `
-
-    await this.sql`
-      CREATE TABLE IF NOT EXISTS rag_ocr_proxy_settings (
-        user_id text PRIMARY KEY REFERENCES rag_ocr_users(id) ON DELETE CASCADE,
-        secret jsonb,
-        updated_at text
-      )
-    `
-
-    await this.sql`
-      CREATE TABLE IF NOT EXISTS rag_ocr_documents (
-        id text PRIMARY KEY,
-        user_id text NOT NULL REFERENCES rag_ocr_users(id) ON DELETE CASCADE,
-        position integer NOT NULL DEFAULT 0,
-        file_name text NOT NULL,
-        original_name text NOT NULL,
-        file_type text NOT NULL,
-        mime_type text NOT NULL,
-        size_bytes integer NOT NULL,
-        status text NOT NULL,
-        storage_path text NOT NULL,
-        storage_key text,
-        text_path text,
-        text_content text,
-        text_preview text,
-        chunk_count integer,
-        job_id text,
-        queued_at text,
-        processing_started_at text,
-        processed_at text,
-        pipeline_version text,
-        pipeline jsonb,
-        error text,
-        created_at text NOT NULL,
-        updated_at text NOT NULL
-      )
-    `
-
-    await this.sql`
-      ALTER TABLE rag_ocr_documents
-      ADD COLUMN IF NOT EXISTS text_content text
-    `
-
-    await this.sql`
-      CREATE INDEX IF NOT EXISTS rag_ocr_documents_user_id_position_idx
-      ON rag_ocr_documents(user_id, position)
-    `
-
-    await this.sql`
-      CREATE TABLE IF NOT EXISTS rag_ocr_document_chunks (
-        id text PRIMARY KEY,
-        user_id text NOT NULL REFERENCES rag_ocr_users(id) ON DELETE CASCADE,
-        document_id text NOT NULL REFERENCES rag_ocr_documents(id) ON DELETE CASCADE,
-        document_name text NOT NULL,
-        chunk_index integer NOT NULL,
-        text text NOT NULL,
-        token_estimate integer NOT NULL,
-        created_at text NOT NULL
-      )
-    `
-
-    await this.sql`
-      CREATE INDEX IF NOT EXISTS rag_ocr_document_chunks_document_id_idx
-      ON rag_ocr_document_chunks(document_id, chunk_index)
-    `
-
-    await this.sql`
-      CREATE INDEX IF NOT EXISTS rag_ocr_document_chunks_user_id_idx
-      ON rag_ocr_document_chunks(user_id)
-    `
+      await this.sql.begin(async (sql) => {
+        await sql.file(migration.path)
+        await sql`
+          INSERT INTO rag_ocr_schema_migrations (version)
+          VALUES (${migration.version})
+          ON CONFLICT (version) DO NOTHING
+        `
+      })
+    }
   }
 
   private async migrateLegacyState(): Promise<void> {
@@ -567,6 +505,9 @@ export class PostgresStore implements AppStore {
     const normalizedRows = await this.sql<{ count: string }[]>`
       SELECT (
         (SELECT count(*) FROM rag_ocr_users) +
+        (SELECT count(*) FROM rag_ocr_sessions) +
+        (SELECT count(*) FROM rag_ocr_service_settings) +
+        (SELECT count(*) FROM rag_ocr_proxy_settings) +
         (SELECT count(*) FROM rag_ocr_documents) +
         (SELECT count(*) FROM rag_ocr_document_chunks)
       )::text AS count
