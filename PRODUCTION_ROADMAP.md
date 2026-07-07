@@ -1,0 +1,158 @@
+# Production Roadmap
+
+Цель: превратить portfolio RAG/OCR demo в production-ready продукт, который можно безопасно разворачивать для клиентов, масштабировать и поддерживать.
+
+## Архитектурные Принципы
+
+- Один продукт, два режима: `Облачный` для managed AI API и `Локальный` для self-hosted stack.
+- API не должен выполнять тяжелую обработку документов синхронно.
+- Все секреты хранятся только в env или зашифрованном server-side хранилище.
+- Каждый ответ должен иметь проверяемые citations.
+- Production окружение должно запускаться как stack: app, database, queue, object storage, vector store, reranker, worker.
+
+## Этап 1: Production Foundation
+
+Статус: начат.
+
+Что уже есть:
+
+- `docker-compose.production.yml` с `app`, `postgres`, `qdrant`, `tei`.
+- PostgreSQL persistence через `DATABASE_URL`.
+- JSON store fallback для local dev.
+- Базовый rate limit.
+- Local TEI reranker на `BAAI/bge-reranker-base`.
+
+Что ещё нужно закрыть:
+
+- Перейти от одного `jsonb` state-row к нормальным таблицам.
+- Добавить миграции.
+- Добавить structured health checks для внешних сервисов.
+- Добавить CI build/lint workflow.
+
+Definition of Done:
+
+- Production stack поднимается одной командой.
+- Данные переживают restart контейнера.
+- Build проходит в CI.
+- Нет секретов в репозитории.
+
+## Этап 2: Реальный RAG Pipeline
+
+Цель: заменить локальный lexical fallback на полноценный retrieval pipeline.
+
+Компоненты:
+
+- embeddings provider: OpenAI-compatible API или локальный embedding service;
+- vector store: Qdrant;
+- rerank: Cohere, Voyage, Jina или Local TEI;
+- answer generation: OpenAI Responses API или локальный LLM в Локальном режиме.
+
+Порядок внедрения:
+
+1. Добавить модуль embeddings + Qdrant indexing/search.
+2. При обработке документа сохранять chunks и vectors в Qdrant.
+3. `/api/ask` должен искать кандидатов через Qdrant.
+4. Reranker должен работать поверх Qdrant candidates.
+5. AnswerGenerator должен формировать ответ через LLM с citations.
+6. Lexical fallback оставить только как degraded mode.
+
+Definition of Done:
+
+- Вопрос по документу использует vector search.
+- Ответ содержит citations с documentId, chunkIndex, score.
+- При недоступном Qdrant API возвращает понятный warning.
+- Есть smoke test `upload -> index -> ask`.
+
+## Этап 3: Worker И Object Storage
+
+Цель: убрать тяжелую обработку из HTTP request.
+
+Компоненты:
+
+- queue: Redis + BullMQ или аналог;
+- worker service;
+- object storage: S3/MinIO;
+- document processing statuses.
+
+Порядок внедрения:
+
+1. API сохраняет файл в object storage и создаёт document record.
+2. API ставит job в queue.
+3. Worker скачивает файл, делает extraction/OCR/chunking/indexing.
+4. Worker обновляет статус документа.
+5. UI polling показывает реальные статусы.
+
+Definition of Done:
+
+- Upload request быстро возвращает `queued`.
+- Worker можно перезапустить без потери job.
+- Failed jobs имеют retry и readable error.
+- Оригиналы файлов не раздаются публично.
+
+## Этап 4: OCR И Document Parsing
+
+Цель: поддержать реальные PDF/сканы/изображения/таблицы.
+
+Порядок внедрения:
+
+1. Разделить `DocumentParser` и `OcrProvider`.
+2. Подключить Mistral OCR для Облачного режима.
+3. Подключить локальный OCR provider для Локального режима.
+4. Сохранять metadata: page, table, sheet, slide.
+5. Передавать metadata в citations.
+
+Definition of Done:
+
+- PDF со сканом проходит OCR.
+- DOCX/TXT/CSV продолжают работать.
+- Citations показывают страницу/таблицу/лист, если metadata есть.
+
+## Этап 5: Security Hardening
+
+Минимальный production набор:
+
+- CSRF protection для cookie auth.
+- Per-route rate limits для login, upload, ask.
+- File type allowlist по MIME и extension.
+- File size limits per plan/user.
+- Audit log действий.
+- Secure headers.
+- CORS policy.
+- Secret rotation plan.
+- Upload antivirus/file scanning hook.
+
+Definition of Done:
+
+- Login нельзя брутфорсить простым циклом.
+- Upload принимает только разрешённые типы.
+- API не логирует secrets.
+- Все state-changing routes защищены от CSRF.
+
+## Этап 6: Observability И Operations
+
+Компоненты:
+
+- structured logs;
+- request id;
+- latency metrics;
+- health endpoints для dependencies;
+- backup/restore procedure для Postgres, Qdrant, object storage;
+- deployment runbook.
+
+Definition of Done:
+
+- Есть `/api/health` и `/api/health/dependencies`.
+- Есть понятный runbook: deploy, rollback, backup, restore.
+- Ошибки pipeline можно диагностировать по logs/job ids.
+
+## Приоритет Следующих Задач
+
+1. Нормализовать PostgreSQL schema.
+2. Интегрировать Qdrant embeddings module.
+3. Вынести processing в worker.
+4. Добавить CSRF + upload validation.
+5. Добавить LLM AnswerGenerator.
+
+## Правило Для Агентов-Исполнителей
+
+Каждый исполнитель получает отдельную зону ответственности и не меняет файлы других потоков без согласования. Архитектор проверяет сборку, объединяет изменения и принимает решение о следующем slice.
