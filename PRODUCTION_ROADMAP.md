@@ -84,6 +84,13 @@ Definition of Done:
 - object storage: S3/MinIO;
 - document processing statuses.
 
+Текущий slice:
+
+- уже поднят каркас Redis + MinIO;
+- уже выделены queue/storage интерфейсы;
+- upload еще не переведен полностью на worker-flow;
+- это подготовительный этап перед полноценным переключением обработки.
+
 Порядок внедрения:
 
 1. API сохраняет файл в object storage и создаёт document record.
@@ -94,7 +101,7 @@ Definition of Done:
 
 Definition of Done:
 
-- Upload request быстро возвращает `queued`.
+- Upload request быстро возвращает `queued` или `uploaded`, без долгой OCR-обработки внутри HTTP.
 - Worker можно перезапустить без потери job.
 - Failed jobs имеют retry и readable error.
 - Оригиналы файлов не раздаются публично.
@@ -159,7 +166,7 @@ Definition of Done:
 
 1. Нормализовать PostgreSQL schema.
 2. Интегрировать Qdrant embeddings module.
-3. Вынести processing в worker.
+3. Довести worker/storage slice до полного переключения upload на очередь.
 4. Закрыть первый security hardening slice: CSRF, Origin/CORS, upload validation, per-route limits, APP_SECRET fail-fast, cookie env hardening.
 5. Добавить LLM AnswerGenerator.
 

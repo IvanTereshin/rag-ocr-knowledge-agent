@@ -1,7 +1,8 @@
 # Production worker + storage plan
 
 Этот документ описывает следующий production-slice для документационного потока.  
-Цель: вынести обработку файлов из HTTP-запроса в фоновый worker и убрать зависимость от локального диска приложения, не ломая текущий runtime API в этом шаге.
+Текущий статус: уже есть каркас для Redis + MinIO + queue/storage interfaces, но upload еще не переведен полностью на worker-flow.
+Цель: постепенно вынести обработку файлов из HTTP-запроса в фоновый worker и убрать зависимость от локального диска приложения, не ломая текущий runtime API в этом шаге.
 
 ## 1. Что есть сейчас
 
@@ -57,6 +58,13 @@ API upload
 - API кладет job в очередь.
 - Worker забирает job, делает OCR и chunking, сохраняет derived data и обновляет документ.
 - API только читает статус и результат, но не выполняет тяжелую обработку.
+
+### Что уже сделано в этом slice
+
+- подготовлен каркас очереди на Redis;
+- подготовлен каркас object storage на MinIO;
+- выделяются интерфейсы для queue/storage, чтобы потом не переписывать API заново;
+- текущий upload-путь пока остается частично синхронным и не переключен целиком на worker.
 
 ## 3. Почему Redis + BullMQ
 
@@ -202,7 +210,46 @@ WORKER_LOG_LEVEL=info
 DOCUMENT_PIPELINE_VERSION=1
 ```
 
-## 8. Что менять потом по файлам
+## 8. Краткий runbook для включения worker позже
+
+Этот блок нужен для следующего шага, когда runtime-код уже будет готов принимать worker.
+
+### Что включать
+
+1. Поднять Redis и MinIO в production stack.
+2. Заполнить worker ENV из списка выше.
+3. Включить worker service в compose или отдельном деплойменте.
+4. Перевести upload на постановку job в очередь, если это еще не сделано.
+5. Проверить, что API больше не ждет OCR/chunking в HTTP request.
+
+### Что проверить
+
+- upload быстро возвращает `queued` или `uploaded`;
+- job реально появляется в Redis queue;
+- worker берет job и меняет статус на `processing`;
+- после завершения документ получает `ready`;
+- при ошибке документ уходит в `failed`, а ошибка читается из metadata;
+- MinIO доступен по `S3_ENDPOINT`, и bucket'и созданы;
+- Redis доступен по `REDIS_URL`;
+- повторный старт worker не ломает уже поставленные jobs.
+
+### Какие ENV должны быть заданы
+
+- `REDIS_URL`
+- `WORKER_CONCURRENCY`
+- `WORKER_JOB_ATTEMPTS`
+- `WORKER_JOB_BACKOFF_MS`
+- `S3_ENDPOINT`
+- `S3_REGION`
+- `S3_ACCESS_KEY_ID`
+- `S3_SECRET_ACCESS_KEY`
+- `S3_BUCKET_SOURCE`
+- `S3_BUCKET_DERIVED`
+- `S3_FORCE_PATH_STYLE`
+- `WORKER_LOG_LEVEL`
+- `DOCUMENT_PIPELINE_VERSION`
+
+## 9. Что менять потом по файлам
 
 Этот список нужен как карта для следующего implementation slice.
 
@@ -239,7 +286,7 @@ DOCUMENT_PIPELINE_VERSION=1
 - более честный UI для `queued` / `processing`;
 - кнопка retry/reprocess.
 
-## 9. Какие API endpoints потом менять
+## 10. Какие API endpoints потом менять
 
 ### Сразу после перехода на queue
 
@@ -261,7 +308,7 @@ DOCUMENT_PIPELINE_VERSION=1
 - `POST /api/ask`
   - обычно менять не нужно сразу, но он должен фильтровать только `ready` документы
 
-## 10. Рекомендуемые этапы внедрения
+## 11. Рекомендуемые этапы внедрения
 
 ### Этап 1. Документ и договоренности
 
@@ -304,21 +351,27 @@ DOCUMENT_PIPELINE_VERSION=1
 - app можно масштабировать отдельно от worker;
 - storage и queue становятся production-ready.
 
-## 11. Минимальный критерий готовности
+## 12. Минимальный критерий готовности текущего scaffolding-slice
 
 Этот slice можно считать удачным, если:
+
+- Redis и MinIO добавлены в production compose, но текущий upload-flow не сломан;
+- env для queue/storage заранее описаны;
+- есть TypeScript interfaces для queue и object storage;
+- текущий runtime API продолжает работать как раньше;
+- следующий slice может подключать worker без повторного проектирования storage keys и job payload.
+
+Полный worker-flow будет готов позже, когда:
 
 - upload не держит request до конца OCR;
 - source file сохраняется вне контейнера app;
 - worker может пережить рестарт без потери очереди;
 - failed document получает понятный `error`;
-- retry не создает дубликаты chunks;
-- текущий runtime API еще не сломан.
+- retry не создает дубликаты chunks.
 
-## 12. Что важно не сделать сейчас
+## 13. Что важно не сделать сейчас
 
 - Не переписывать весь pipeline сразу.
 - Не трогать `package.json`, `server.ts` и `store.ts` в этом шаге.
 - Не смешивать queue design с полной сменой vector store.
 - Не добавлять лишние runtime изменения, пока не готов worker slice.
-
