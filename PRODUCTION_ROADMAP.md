@@ -54,9 +54,10 @@ Definition of Done:
 - чанки пишутся в Qdrant через `upsert`;
 - поиск идёт через Qdrant `search`;
 - сверху результатов работает reranker;
-- если retrieval недоступен, система деградирует в fallback-режим.
+- AnswerGenerator использует OpenAI Responses API поверх выбранных citations;
+- если retrieval, rerank или answer generation недоступны, система деградирует в fallback-режим.
 
-Это базовый production-срез для следующего шага: сначала стабильный vector retrieval, потом уже worker, OCR и остальная обвязка.
+Это базовый production-срез RAG: сначала находится проверяемый контекст, потом LLM формирует ответ строго по citations.
 
 Порядок внедрения:
 
@@ -64,7 +65,7 @@ Definition of Done:
 2. При обработке документа сохранять chunks и vectors в Qdrant.
 3. `/api/ask` должен искать кандидатов через Qdrant.
 4. Reranker должен работать поверх Qdrant candidates.
-5. AnswerGenerator должен формировать ответ через LLM с citations.
+5. AnswerGenerator должен формировать ответ через LLM с citations. Готово для OpenAI Responses API.
 6. Lexical fallback оставить только как degraded mode.
 
 Definition of Done:
@@ -72,6 +73,7 @@ Definition of Done:
 - Вопрос по документу использует vector search.
 - Ответ содержит citations с documentId, chunkIndex, score.
 - При недоступном Qdrant API возвращает понятный warning.
+- При недоступном OpenAI answer generation возвращает шаблонный ответ, а не 500.
 - Есть smoke test `upload -> index -> ask`.
 
 ## Этап 3: Worker И Object Storage
@@ -168,7 +170,7 @@ Definition of Done:
 
 ## Приоритет Следующих Задач
 
-1. Добавить LLM AnswerGenerator с citations.
+1. Добавить local LLM AnswerGenerator для Локального режима.
 2. Нормализовать PostgreSQL schema и добавить миграции.
 3. Вынести derived text/chunks artifacts из shared volume в object storage или нормальные таблицы.
 4. Добавить structured health checks для Redis, MinIO, Qdrant, TEI и AI providers.

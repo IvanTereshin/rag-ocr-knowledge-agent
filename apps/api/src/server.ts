@@ -27,6 +27,7 @@ import { createJobQueueFromEnv } from './queue.js'
 import { createSourceObjectStorageFromEnv } from './object-storage.js'
 import { createStoreFromEnv } from './store.js'
 import { indexPipelineResultInVectorStore, searchVectorCandidatesInVectorStore } from './vector-indexing.js'
+import { generateOpenAIAnswer } from './answer-generation.js'
 import type {
   DocumentChunkRecord,
   DocumentRecord,
@@ -104,6 +105,8 @@ type AgentMode = 'cloud' | 'local'
 type RerankerServiceSettings = ServiceSettingsRecord & {
   provider: RerankerProvider
 }
+
+type AnswerEngine = 'template-fallback' | 'openai-responses'
 
 const defaultServices: ServiceSettingsRecord[] = [
   {
@@ -820,6 +823,10 @@ function getServices(data: StoreData, userId: string): ServiceSettingsRecord[] {
   }
 
   return defaultServices
+}
+
+function getServiceForProvider(data: StoreData, userId: string, provider: ServiceProvider) {
+  return getServices(data, userId).find((service) => service.provider === provider)
 }
 
 function normalizeRerankerSelection(services: ServiceSettingsRecord[]) {
@@ -1655,12 +1662,56 @@ async function main() {
     }
 
     const result = answerQuestion(question, chunks, rankedChunks)
+    let answer = result.answer
+    let answerEngine: AnswerEngine = 'template-fallback'
+
+    if (mode === 'cloud' && result.citations.length) {
+      const openaiService = getServiceForProvider(data, user.id, 'openai')
+
+      if (!openaiService?.enabled) {
+        warnings.push(ruQuestion
+          ? 'OpenAI выключен в настройках, поэтому использован шаблонный ответ.'
+          : 'OpenAI is disabled in settings, so the template answer was used.')
+      } else {
+        try {
+          const apiKey = getServiceSecret(openaiService)
+          const sharedProxy = getSharedProxyUrl(getProxySettings(data, user.id))
+
+          if (!apiKey) {
+            warnings.push(ruQuestion
+              ? 'OpenAI API key не добавлен, поэтому использован шаблонный ответ.'
+              : 'OpenAI API key is missing, so the template answer was used.')
+          } else if (sharedProxy.error) {
+            warnings.push(sharedProxy.error)
+          } else {
+            const generated = await generateOpenAIAnswer({
+              service: openaiService,
+              apiKey,
+              proxyUrl: sharedProxy.url,
+              question,
+              citations: result.citations,
+              language: ruQuestion ? 'ru' : 'en',
+            })
+
+            answer = generated.answer
+            answerEngine = generated.provider
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Answer generation failed'
+          warnings.push(ruQuestion
+            ? `Генерация ответа через OpenAI недоступна: ${message}. Использован шаблонный ответ.`
+            : `OpenAI answer generation is unavailable: ${message}. Template answer was used.`)
+          app.log.warn({ warning: message }, 'Answer generation fallback to template')
+        }
+      }
+    }
 
     return {
-      answer: result.answer,
+      answer,
       citations: result.citations.map(publicCitation),
       engine,
       mode,
+      answerEngine,
       warning: warnings.length ? warnings.join(' ') : undefined,
     }
   })

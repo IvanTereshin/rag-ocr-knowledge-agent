@@ -67,6 +67,7 @@ export type AskResponse = {
   answer: string
   engine: 'local-retrieval' | 'qdrant-vector' | 'cohere-rerank' | 'voyage-rerank' | 'jina-rerank' | 'tei-rerank'
   mode: AgentMode
+  answerEngine?: 'template-fallback' | 'openai-responses'
   warning?: string
   citations: Array<{
     id: string
