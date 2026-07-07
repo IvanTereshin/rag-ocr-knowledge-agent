@@ -1,0 +1,13 @@
+{
+  "name": "rag-ocr-knowledge-agent",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "npm --prefix apps/web run dev",
+    "build": "npm run build:web && npm run build:api",
+    "build:web": "npm --prefix apps/web run build",
+    "build:api": "npm --prefix apps/api run build",
+    "lint": "npm --prefix apps/web run lint",
+    "preview": "npm --prefix apps/web run preview"
+  }
+}

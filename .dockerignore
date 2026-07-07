@@ -1,0 +1,17 @@
+**/node_modules
+**/dist
+**/.vite
+**/.turbo
+**/.DS_Store
+.git
+.env
+.env.*
+!.env.example
+coverage
+uploads
+storage
+data
+models
+qdrant_storage
+postgres_data
+redis_data
