@@ -10,6 +10,7 @@
     "worker": "npm --prefix apps/api run worker",
     "lint": "npm --prefix apps/web run lint",
     "preview": "npm --prefix apps/web run preview",
-    "test:smoke:local-llm": "node scripts/smoke-local-llm.mjs"
+    "test:smoke:local-llm": "node scripts/smoke-rag.mjs local-llm",
+    "test:smoke:cloud-openai": "node scripts/smoke-rag.mjs cloud-openai"
   }
 }

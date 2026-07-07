@@ -40,6 +40,9 @@ jobs:
       - name: Smoke test local RAG and LLM
         run: npm run test:smoke:local-llm
 
+      - name: Smoke test cloud RAG and OpenAI
+        run: npm run test:smoke:cloud-openai
+
       - name: Validate production compose config
         run: |
           cp .env.production.example .env.production

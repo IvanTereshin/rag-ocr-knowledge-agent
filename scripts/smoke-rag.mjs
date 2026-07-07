@@ -9,7 +9,9 @@ import { File } from 'node:buffer'
 
 const rootDir = process.cwd()
 const apiDistPath = join(rootDir, 'apps/api/dist/server.js')
-const smokePhrase = `LOCAL_SMOKE_PHRASE_${randomUUID().slice(0, 8)}`
+const smokeMode = parseSmokeMode(process.argv[2])
+const isCloudOpenAiSmoke = smokeMode === 'cloud-openai'
+const smokePhrase = `${isCloudOpenAiSmoke ? 'CLOUD_OPENAI' : 'LOCAL_LLM'}_SMOKE_PHRASE_${randomUUID().slice(0, 8)}`
 const smokeQuestion = 'What unique phrase is in the uploaded document?'
 
 const logs = {
@@ -100,15 +102,23 @@ async function main() {
     ? csrfPayload.headerName
     : 'x-csrf-token'
 
-  console.log('[3/5] save local-llm settings')
-  const settingsPayload = await fetchJson(`${baseUrl}/api/settings/services`, {
-    method: 'PUT',
-    headers: jsonHeaders({
-      ...cookieJar.headers(),
-      [csrfHeaderName]: csrfPayload.csrfToken,
-    }),
-    body: JSON.stringify({
-      services: [
+  console.log(`[3/5] save ${answerServiceProviderName()} settings`)
+  const serviceUpdates = isCloudOpenAiSmoke
+    ? [
+        {
+          provider: 'openai',
+          enabled: true,
+          label: 'Smoke OpenAI Responses API',
+          baseUrl: `http://127.0.0.1:${fakeLlmPort}/v1`,
+          model: 'smoke-openai-model',
+          apiKey: 'smoke-openai-key',
+        },
+        {
+          provider: 'qdrant',
+          enabled: false,
+        },
+      ]
+    : [
         {
           provider: 'local-llm',
           enabled: true,
@@ -116,20 +126,29 @@ async function main() {
           baseUrl: `http://127.0.0.1:${fakeLlmPort}/v1`,
           model: 'smoke-local-model',
         },
-      ],
+      ]
+  const settingsPayload = await fetchJson(`${baseUrl}/api/settings/services`, {
+    method: 'PUT',
+    headers: jsonHeaders({
+      ...cookieJar.headers(),
+      [csrfHeaderName]: csrfPayload.csrfToken,
+    }),
+    body: JSON.stringify({
+      services: serviceUpdates,
     }),
   }, cookieJar)
 
-  const localLlmService = Array.isArray(settingsPayload.services)
-    ? settingsPayload.services.find((service) => service.provider === 'local-llm')
+  const answerServiceProvider = isCloudOpenAiSmoke ? 'openai' : 'local-llm'
+  const answerService = Array.isArray(settingsPayload.services)
+    ? settingsPayload.services.find((service) => service.provider === answerServiceProvider)
     : null
-  assert(localLlmService?.validation?.status === 'valid', `local-llm validation failed: ${JSON.stringify(localLlmService?.validation)}`)
+  assert(answerService?.validation?.status === 'valid', `${answerServiceProvider} validation failed: ${JSON.stringify(answerService?.validation)}`)
 
   console.log('[4/5] upload text file')
   const uploadText = [
     'This document is used for the local smoke test.',
     `Unique phrase: ${smokePhrase}`,
-    'The answer should come from the local LLM path.',
+    `The answer should come from the ${isCloudOpenAiSmoke ? 'OpenAI Responses' : 'local LLM'} path.`,
   ].join('\n')
   const uploadPayload = new FormData()
   uploadPayload.append('files', new File([uploadText], 'smoke.txt', { type: 'text/plain' }))
@@ -146,7 +165,7 @@ async function main() {
   assert(Array.isArray(uploadResult.documents) && uploadResult.documents.length === 1, 'Upload did not return one document')
   assert(uploadResult.documents[0].status === 'ready', `Document is not ready: ${JSON.stringify(uploadResult.documents[0])}`)
 
-  console.log('[5/5] ask in local mode')
+  console.log(`[5/5] ask in ${isCloudOpenAiSmoke ? 'cloud' : 'local'} mode`)
   const askPayload = await fetchJson(`${baseUrl}/api/ask`, {
     method: 'POST',
     headers: jsonHeaders({
@@ -155,16 +174,18 @@ async function main() {
     }),
     body: JSON.stringify({
       question: smokeQuestion,
-      mode: 'local',
+      mode: isCloudOpenAiSmoke ? 'cloud' : 'local',
     }),
   }, cookieJar)
 
-  assert(askPayload.mode === 'local', `Expected local mode, got ${askPayload.mode}`)
-  assert(askPayload.answerEngine === 'local-openai-compatible', `Unexpected answer engine: ${askPayload.answerEngine}`)
+  const expectedMode = isCloudOpenAiSmoke ? 'cloud' : 'local'
+  const expectedAnswerEngine = isCloudOpenAiSmoke ? 'openai-responses' : 'local-openai-compatible'
+  assert(askPayload.mode === expectedMode, `Expected ${expectedMode} mode, got ${askPayload.mode}`)
+  assert(askPayload.answerEngine === expectedAnswerEngine, `Unexpected answer engine: ${askPayload.answerEngine}`)
   assert(typeof askPayload.answer === 'string' && askPayload.answer.includes(smokePhrase), `Answer does not include smoke phrase: ${askPayload.answer}`)
   assert(Array.isArray(askPayload.citations) && askPayload.citations.length > 0, 'No citations returned')
 
-  console.log(`Smoke test passed: local RAG + local LLM are working. Phrase: ${smokePhrase}`)
+  console.log(`Smoke test passed: ${smokeMode} RAG answer path is working. Phrase: ${smokePhrase}`)
 }
 
 async function assertBuilt() {
@@ -209,7 +230,27 @@ function createFakeLlmServer() {
       if (req.method === 'GET' && url.pathname === '/v1/models') {
         writeJson(res, 200, {
           object: 'list',
-          data: [{ id: 'smoke-local-model', object: 'model' }],
+          data: [
+            { id: 'smoke-local-model', object: 'model' },
+            { id: 'smoke-openai-model', object: 'model' },
+          ],
+        })
+        return
+      }
+
+      if (req.method === 'POST' && url.pathname === '/v1/responses') {
+        const body = await readJsonBody(req)
+        const payloadText = JSON.stringify(body)
+        logs.fakeLlm.push(`[responses] ${payloadText}`)
+        if (!payloadText.includes(smokePhrase)) {
+          writeJson(res, 500, { error: { message: `Smoke phrase was not forwarded to OpenAI Responses: ${smokePhrase}` } })
+          return
+        }
+
+        writeJson(res, 200, {
+          id: `resp-${randomUUID()}`,
+          object: 'response',
+          output_text: `Smoke answer confirmed: ${smokePhrase}`,
         })
         return
       }
@@ -399,4 +440,20 @@ function assert(condition, message) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function parseSmokeMode(value) {
+  if (!value || value === 'local-llm') {
+    return 'local-llm'
+  }
+
+  if (value === 'cloud-openai') {
+    return 'cloud-openai'
+  }
+
+  throw new Error(`Unknown smoke mode: ${value}. Use local-llm or cloud-openai.`)
+}
+
+function answerServiceProviderName() {
+  return isCloudOpenAiSmoke ? 'openai' : 'local-llm'
 }

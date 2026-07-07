@@ -18,6 +18,15 @@ curl -fsS http://localhost:3000/api/health
 curl -fsS http://localhost:3000/api/health/dependencies | jq
 ```
 
+## Smoke checks
+
+Перед деплоем после `npm run build` прогоните:
+
+```bash
+npm run test:smoke:local-llm
+npm run test:smoke:cloud-openai
+```
+
 `/api/health/dependencies` возвращает:
 
 - `ok` - все обязательные зависимости доступны;
