@@ -3,6 +3,7 @@ import type { EncryptedSecret } from './store.js'
 
 const keySalt = 'rag-ocr-agent-settings-v1'
 const localDevelopmentSecret = 'local-development-secret-change-me'
+const minProductionSecretLength = 32
 
 export function assertAppSecretIsSafe(): void {
   const secret = process.env.APP_SECRET?.trim()
@@ -17,6 +18,10 @@ export function assertAppSecretIsSafe(): void {
 
   if (secret === localDevelopmentSecret || secret.startsWith('replace-with-')) {
     throw new Error('APP_SECRET must be changed before production startup')
+  }
+
+  if (secret.length < minProductionSecretLength) {
+    throw new Error(`APP_SECRET must be at least ${minProductionSecretLength} characters in production`)
   }
 }
 
