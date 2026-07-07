@@ -5,7 +5,7 @@ export type User = {
   createdAt: string
 }
 
-export type ServiceProvider = 'openai' | 'mistral' | 'cohere' | 'voyage' | 'jina' | 'tei' | 'qdrant'
+export type ServiceProvider = 'openai' | 'mistral' | 'cohere' | 'voyage' | 'jina' | 'tei' | 'local-llm' | 'qdrant'
 export type AgentMode = 'cloud' | 'local'
 
 export type ServiceValidation = {
@@ -67,7 +67,7 @@ export type AskResponse = {
   answer: string
   engine: 'local-retrieval' | 'qdrant-vector' | 'cohere-rerank' | 'voyage-rerank' | 'jina-rerank' | 'tei-rerank'
   mode: AgentMode
-  answerEngine?: 'template-fallback' | 'openai-responses'
+  answerEngine?: 'template-fallback' | 'openai-responses' | 'local-openai-compatible'
   warning?: string
   citations: Array<{
     id: string

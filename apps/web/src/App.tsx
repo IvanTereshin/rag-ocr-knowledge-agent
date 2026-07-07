@@ -55,7 +55,7 @@ function isRerankerProvider(provider: ServiceProvider): provider is RerankerProv
 }
 
 function serviceRequiresApiKey(provider: ServiceProvider) {
-  return provider !== 'tei'
+  return provider !== 'tei' && provider !== 'local-llm'
 }
 
 function proxyAppliesToProvider(provider: ServiceProvider) {

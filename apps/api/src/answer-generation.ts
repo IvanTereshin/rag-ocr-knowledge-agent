@@ -11,7 +11,7 @@ type JsonRecord = Record<string, unknown>
 
 type GenerateOpenAIAnswerOptions = {
   service: ServiceSettingsRecord
-  apiKey: string
+  apiKey?: string
   proxyUrl?: string
   question: string
   citations: RankedChunk[]
@@ -28,18 +28,23 @@ type OpenAIResponsesPayload = {
   }>
 }
 
+type ChatCompletionsPayload = {
+  choices?: Array<{
+    message?: {
+      content?: unknown
+    }
+  }>
+}
+
 export type GeneratedAnswer = {
   answer: string
-  provider: 'openai-responses'
+  provider: 'openai-responses' | 'local-openai-compatible'
 }
 
 export async function generateOpenAIAnswer(options: GenerateOpenAIAnswerOptions): Promise<GeneratedAnswer> {
   const response = await fetchWithOptionalProxy(options.proxyUrl)(responsesUrl(options.service.baseUrl), {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${options.apiKey}`,
-    },
+    headers: jsonHeaders(options.apiKey),
     body: JSON.stringify({
       model: options.service.model || process.env.ANSWER_MODEL || 'gpt-4.1',
       input: [
@@ -69,6 +74,43 @@ export async function generateOpenAIAnswer(options: GenerateOpenAIAnswerOptions)
   return {
     answer,
     provider: 'openai-responses',
+  }
+}
+
+export async function generateOpenAICompatibleChatAnswer(options: GenerateOpenAIAnswerOptions): Promise<GeneratedAnswer> {
+  const response = await fetchWithOptionalProxy(options.proxyUrl)(chatCompletionsUrl(options.service.baseUrl), {
+    method: 'POST',
+    headers: jsonHeaders(options.apiKey),
+    body: JSON.stringify({
+      model: options.service.model,
+      messages: [
+        {
+          role: 'system',
+          content: systemPrompt(options.language),
+        },
+        {
+          role: 'user',
+          content: userPrompt(options.question, options.citations, options.language),
+        },
+      ],
+      temperature: 0.2,
+      max_tokens: maxOutputTokens,
+    }),
+  }, parsePositiveInteger(process.env.RAG_REQUEST_TIMEOUT_MS, defaultRequestTimeoutMs))
+
+  const payload = (await readJsonResponse(response)) as ChatCompletionsPayload
+  if (!response.ok) {
+    throw new Error(providerErrorMessage(options.service.label, response, payload))
+  }
+
+  const answer = extractChatCompletionText(payload)
+  if (!answer) {
+    throw new Error(`${options.service.label} returned an empty answer`)
+  }
+
+  return {
+    answer,
+    provider: 'local-openai-compatible',
   }
 }
 
@@ -152,6 +194,22 @@ function responsesUrl(baseUrl: string) {
   return joinUrl(normalizedBaseUrl, '/v1/responses')
 }
 
+function chatCompletionsUrl(baseUrl: string) {
+  const normalizedBaseUrl = trimTrailingSlash(baseUrl.trim())
+  const parsed = new URL(normalizedBaseUrl)
+  const normalizedPath = trimTrailingSlash(parsed.pathname)
+
+  if (normalizedPath.endsWith('/chat/completions')) {
+    return normalizedBaseUrl
+  }
+
+  if (/\/v\d+$/.test(normalizedPath)) {
+    return joinUrl(normalizedBaseUrl, '/chat/completions')
+  }
+
+  return joinUrl(normalizedBaseUrl, '/v1/chat/completions')
+}
+
 async function readJsonResponse(response: Response): Promise<unknown> {
   const text = await response.text().catch(() => '')
   if (!text) {
@@ -177,6 +235,19 @@ function extractResponseText(payload: OpenAIResponsesPayload) {
     .filter(Boolean)
     .join('\n')
     .trim()
+}
+
+function extractChatCompletionText(payload: ChatCompletionsPayload) {
+  const choices = Array.isArray(payload.choices) ? payload.choices : []
+  const content = choices[0]?.message?.content
+  return typeof content === 'string' ? content.trim() : ''
+}
+
+function jsonHeaders(apiKey?: string) {
+  return {
+    'Content-Type': 'application/json',
+    ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+  }
 }
 
 function providerErrorMessage(providerName: string, response: Response, payload: unknown): string {

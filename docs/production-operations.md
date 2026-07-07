@@ -54,3 +54,15 @@ TEI_BASE_URL=http://tei:80
 - `object-storage degraded` - проверьте MinIO/S3 credentials и bucket.
 - `qdrant degraded` - vector search уйдёт в local retrieval fallback.
 - `tei degraded` - local rerank уйдёт в local retrieval fallback.
+
+## Local LLM
+
+Для Локального режима в настройках есть `Local LLM Answer Generator`.
+
+Рекомендуемый OpenAI-compatible endpoint:
+
+```text
+http://host.docker.internal:11434/v1
+```
+
+Примеры совместимых runtime: Ollama с OpenAI-compatible API, LM Studio, vLLM, llama.cpp server. Если local LLM выключен или недоступен, `/api/ask` возвращает шаблонный ответ с citations вместо ошибки 500.

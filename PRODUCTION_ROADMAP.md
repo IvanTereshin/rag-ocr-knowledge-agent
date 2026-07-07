@@ -56,6 +56,7 @@ Definition of Done:
 - поиск идёт через Qdrant `search`;
 - сверху результатов работает reranker;
 - AnswerGenerator использует OpenAI Responses API поверх выбранных citations;
+- Локальный AnswerGenerator использует OpenAI-compatible `/chat/completions` provider;
 - если retrieval, rerank или answer generation недоступны, система деградирует в fallback-режим.
 
 Это базовый production-срез RAG: сначала находится проверяемый контекст, потом LLM формирует ответ строго по citations.
@@ -173,9 +174,9 @@ Definition of Done:
 
 ## Приоритет Следующих Задач
 
-1. Добавить local LLM AnswerGenerator для Локального режима.
-2. Закрыть оставшиеся security hardening задачи и backup/restore runbook.
-3. Добавить отдельные migration files, если появится следующая версия схемы.
+1. Закрыть оставшиеся security hardening задачи и backup/restore runbook.
+2. Добавить отдельные migration files, если появится следующая версия схемы.
+3. Добавить production E2E tests для cloud/local режимов.
 
 ## Правило Для Агентов-Исполнителей
 

@@ -27,7 +27,7 @@ import { createJobQueueFromEnv } from './queue.js'
 import { createSourceObjectStorageFromEnv } from './object-storage.js'
 import { createStoreFromEnv } from './store.js'
 import { indexPipelineResultInVectorStore, searchVectorCandidatesInVectorStore } from './vector-indexing.js'
-import { generateOpenAIAnswer } from './answer-generation.js'
+import { generateOpenAIAnswer, generateOpenAICompatibleChatAnswer } from './answer-generation.js'
 import { checkDependencies } from './health.js'
 import type {
   DocumentChunkRecord,
@@ -107,7 +107,7 @@ type RerankerServiceSettings = ServiceSettingsRecord & {
   provider: RerankerProvider
 }
 
-type AnswerEngine = 'template-fallback' | 'openai-responses'
+type AnswerEngine = 'template-fallback' | 'openai-responses' | 'local-openai-compatible'
 
 const defaultServices: ServiceSettingsRecord[] = [
   {
@@ -156,6 +156,14 @@ const defaultServices: ServiceSettingsRecord[] = [
     label: 'Local TEI Reranker',
     baseUrl: 'http://host.docker.internal:8080',
     model: 'BAAI/bge-reranker-base',
+    validation: { status: 'unchecked', message: 'Not checked yet' },
+  },
+  {
+    provider: 'local-llm',
+    enabled: false,
+    label: 'Local LLM Answer Generator',
+    baseUrl: 'http://host.docker.internal:11434/v1',
+    model: 'llama3.1',
     validation: { status: 'unchecked', message: 'Not checked yet' },
   },
   {
@@ -434,14 +442,14 @@ function isRerankerProvider(provider: ServiceProvider): provider is RerankerProv
 }
 
 function serviceRequiresApiKey(provider: ServiceProvider) {
-  return provider !== 'tei'
+  return provider !== 'tei' && provider !== 'local-llm'
 }
 
-async function validateModelProvider(service: ServiceSettingsRecord, apiKey: string, proxyUrl?: string) {
+async function validateModelProvider(service: ServiceSettingsRecord, apiKey?: string, proxyUrl?: string) {
   const response = await fetchWithTimeout(joinUrl(service.baseUrl, '/models'), {
     method: 'GET',
     headers: {
-      Authorization: `Bearer ${apiKey}`,
+      ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
     },
   }, proxyUrl)
 
@@ -761,6 +769,8 @@ async function validateService(
         return await validateModelProvider(service, apiKey ?? '', proxyUrl)
       case 'mistral':
         return await validateModelProvider(service, apiKey ?? '')
+      case 'local-llm':
+        return await validateModelProvider(service, apiKey)
       case 'cohere':
       case 'voyage':
       case 'jina':
@@ -1677,33 +1687,41 @@ async function main() {
     let answer = result.answer
     let answerEngine: AnswerEngine = 'template-fallback'
 
-    if (mode === 'cloud' && result.citations.length) {
-      const openaiService = getServiceForProvider(data, user.id, 'openai')
+    if (result.citations.length) {
+      const answerService = mode === 'cloud'
+        ? getServiceForProvider(data, user.id, 'openai')
+        : getServiceForProvider(data, user.id, 'local-llm')
+      const serviceLabel = mode === 'cloud' ? 'OpenAI' : 'Local LLM'
 
-      if (!openaiService?.enabled) {
+      if (!answerService?.enabled) {
         warnings.push(ruQuestion
-          ? 'OpenAI выключен в настройках, поэтому использован шаблонный ответ.'
-          : 'OpenAI is disabled in settings, so the template answer was used.')
+          ? `${serviceLabel} выключен в настройках, поэтому использован шаблонный ответ.`
+          : `${serviceLabel} is disabled in settings, so the template answer was used.`)
       } else {
         try {
-          const apiKey = getServiceSecret(openaiService)
+          const apiKey = getServiceSecret(answerService)
           const sharedProxy = getSharedProxyUrl(getProxySettings(data, user.id))
+          const needsApiKey = serviceRequiresApiKey(answerService.provider)
+          const needsProxy = proxyAppliesTo(answerService.provider)
 
-          if (!apiKey) {
+          if (!apiKey && needsApiKey) {
             warnings.push(ruQuestion
-              ? 'OpenAI API key не добавлен, поэтому использован шаблонный ответ.'
-              : 'OpenAI API key is missing, so the template answer was used.')
-          } else if (sharedProxy.error) {
+              ? `${serviceLabel} API key не добавлен, поэтому использован шаблонный ответ.`
+              : `${serviceLabel} API key is missing, so the template answer was used.`)
+          } else if (needsProxy && sharedProxy.error) {
             warnings.push(sharedProxy.error)
           } else {
-            const generated = await generateOpenAIAnswer({
-              service: openaiService,
+            const answerOptions = {
+              service: answerService,
               apiKey,
-              proxyUrl: sharedProxy.url,
+              proxyUrl: needsProxy ? sharedProxy.url : undefined,
               question,
               citations: result.citations,
-              language: ruQuestion ? 'ru' : 'en',
-            })
+              language: ruQuestion ? 'ru' as const : 'en' as const,
+            }
+            const generated = mode === 'cloud'
+              ? await generateOpenAIAnswer(answerOptions)
+              : await generateOpenAICompatibleChatAnswer(answerOptions)
 
             answer = generated.answer
             answerEngine = generated.provider
@@ -1711,8 +1729,8 @@ async function main() {
         } catch (error) {
           const message = error instanceof Error ? error.message : 'Answer generation failed'
           warnings.push(ruQuestion
-            ? `Генерация ответа через OpenAI недоступна: ${message}. Использован шаблонный ответ.`
-            : `OpenAI answer generation is unavailable: ${message}. Template answer was used.`)
+            ? `Генерация ответа через ${serviceLabel} недоступна: ${message}. Использован шаблонный ответ.`
+            : `${serviceLabel} answer generation is unavailable: ${message}. Template answer was used.`)
           app.log.warn({ warning: message }, 'Answer generation fallback to template')
         }
       }

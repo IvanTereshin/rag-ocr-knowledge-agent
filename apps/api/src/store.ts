@@ -26,7 +26,7 @@ export type EncryptedSecret = {
   last4: string
 }
 
-export type ServiceProvider = 'openai' | 'mistral' | 'cohere' | 'voyage' | 'jina' | 'tei' | 'qdrant'
+export type ServiceProvider = 'openai' | 'mistral' | 'cohere' | 'voyage' | 'jina' | 'tei' | 'local-llm' | 'qdrant'
 
 export type ServiceValidationRecord = {
   status: 'unchecked' | 'valid' | 'invalid' | 'skipped'
