@@ -65,7 +65,7 @@ export type UserDocument = {
 
 export type AskResponse = {
   answer: string
-  engine: 'local-retrieval' | 'cohere-rerank' | 'voyage-rerank' | 'jina-rerank' | 'tei-rerank'
+  engine: 'local-retrieval' | 'qdrant-vector' | 'cohere-rerank' | 'voyage-rerank' | 'jina-rerank' | 'tei-rerank'
   mode: AgentMode
   warning?: string
   citations: Array<{

@@ -20,7 +20,8 @@ import {
   verifyPassword,
 } from './security.js'
 import { answerQuestion, createPipelineSteps, processDocument, readDocumentText, selectAnswerCandidates } from './pipeline.js'
-import type { RankedChunk } from './pipeline.js'
+import type { PipelineResult, RankedChunk } from './pipeline.js'
+import { createEmbeddingProvider, createQdrantClient } from './rag.js'
 import { createStoreFromEnv } from './store.js'
 import type {
   DocumentChunkRecord,
@@ -44,11 +45,15 @@ const maxRerankCandidates = 12
 const rerankResultLimit = 3
 const rateLimitMax = Number(process.env.RATE_LIMIT_MAX ?? 180)
 const rateLimitWindow = process.env.RATE_LIMIT_WINDOW ?? '1 minute'
+const embeddingModel = process.env.EMBEDDING_MODEL?.trim() || 'text-embedding-3-small'
+const qdrantCollectionName = process.env.QDRANT_COLLECTION?.trim() || 'rag_ocr_chunks'
+const vectorSearchLimit = parsePositiveInteger(process.env.VECTOR_SEARCH_LIMIT, maxRerankCandidates)
+const ragRequestTimeoutMs = parsePositiveInteger(process.env.RAG_REQUEST_TIMEOUT_MS, 15_000)
 const store = createStoreFromEnv()
 const proxyAgents = new Map<string, ProxyAgent>()
 const rerankerProviders = ['cohere', 'voyage', 'jina', 'tei'] as const
 type RerankerProvider = (typeof rerankerProviders)[number]
-type AskEngine = 'local-retrieval' | `${RerankerProvider}-rerank`
+type AskEngine = 'local-retrieval' | 'qdrant-vector' | `${RerankerProvider}-rerank`
 
 type AuthBody = {
   name?: string
@@ -217,6 +222,11 @@ function serviceValidation(
   }
 }
 
+function parsePositiveInteger(value: string | undefined, fallback: number) {
+  const parsed = Number(value)
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback
+}
+
 function trimTrailingSlash(value: string) {
   return value.replace(/\/+$/, '')
 }
@@ -258,6 +268,14 @@ async function fetchWithTimeout(url: string, init: ProxyFetchInit = {}, proxyUrl
   } finally {
     clearTimeout(timeout)
   }
+}
+
+function fetchWithOptionalProxy(proxyUrl?: string) {
+  return (url: string, init: RequestInit) =>
+    undiciFetch(url, {
+      ...init,
+      ...(proxyUrl ? { dispatcher: proxyAgentFor(proxyUrl) } : {}),
+    } as Parameters<typeof undiciFetch>[1]) as Promise<Response>
 }
 
 async function readResponseText(response: Response) {
@@ -612,6 +630,158 @@ function getServiceSecret(service: ServiceSettingsRecord) {
   }
 
   return decryptSecret(service.secret)
+}
+
+type VectorRuntime = {
+  ready: true
+  embeddingProvider: ReturnType<typeof createEmbeddingProvider>
+  qdrantClient: ReturnType<typeof createQdrantClient>
+} | {
+  ready: false
+  warning: string
+}
+
+function getServiceForProvider(data: StoreData, userId: string, provider: ServiceProvider) {
+  return getServices(data, userId).find((service) => service.provider === provider)
+}
+
+function createVectorRuntime(data: StoreData, userId: string): VectorRuntime {
+  const openaiService = getServiceForProvider(data, userId, 'openai')
+  const qdrantService = getServiceForProvider(data, userId, 'qdrant')
+
+  if (!openaiService?.enabled) {
+    return { ready: false, warning: 'OpenAI embeddings service is disabled' }
+  }
+
+  if (!qdrantService?.enabled) {
+    return { ready: false, warning: 'Qdrant vector store is disabled' }
+  }
+
+  let openaiApiKey: string | undefined
+  let qdrantApiKey: string | undefined
+  try {
+    openaiApiKey = getServiceSecret(openaiService)
+    qdrantApiKey = getServiceSecret(qdrantService)
+  } catch {
+    return { ready: false, warning: 'Stored vector service key could not be decrypted' }
+  }
+
+  if (!openaiApiKey) {
+    return { ready: false, warning: 'OpenAI API key is missing for embeddings' }
+  }
+
+  try {
+    new URL(openaiService.baseUrl)
+    new URL(qdrantService.baseUrl)
+  } catch {
+    return { ready: false, warning: 'Vector service Base URL is invalid' }
+  }
+
+  const sharedProxy = getSharedProxyUrl(getProxySettings(data, userId))
+  if (sharedProxy.error) {
+    return { ready: false, warning: sharedProxy.error }
+  }
+
+  return {
+    ready: true,
+    embeddingProvider: createEmbeddingProvider({
+      baseUrl: openaiService.baseUrl,
+      model: embeddingModel,
+      apiKey: openaiApiKey,
+      timeoutMs: ragRequestTimeoutMs,
+      fetch: fetchWithOptionalProxy(sharedProxy.url),
+    }),
+    qdrantClient: createQdrantClient({
+      baseUrl: qdrantService.baseUrl,
+      apiKey: qdrantApiKey,
+      timeoutMs: ragRequestTimeoutMs,
+    }),
+  }
+}
+
+async function embedTextsInBatches(
+  embeddingProvider: ReturnType<typeof createEmbeddingProvider>,
+  texts: string[],
+) {
+  const batchSize = 16
+  const vectors: number[][] = []
+
+  for (let index = 0; index < texts.length; index += batchSize) {
+    vectors.push(...await embeddingProvider.embedTexts(texts.slice(index, index + batchSize)))
+  }
+
+  return vectors
+}
+
+async function indexPipelineResultInVectorStore(
+  data: StoreData,
+  userId: string,
+  result: PipelineResult,
+): Promise<PipelineResult> {
+  if (result.document.status !== 'ready' || !result.chunks.length) {
+    return result
+  }
+
+  const runtime = createVectorRuntime(data, userId)
+  if (!runtime.ready) {
+    return {
+      ...result,
+      document: withIndexPipelineMessage(
+        result.document,
+        `Indexed ${result.chunks.length} chunks locally. Vector index skipped: ${runtime.warning}`,
+      ),
+    }
+  }
+
+  try {
+    const vectors = await embedTextsInBatches(runtime.embeddingProvider, result.chunks.map((chunk) => chunk.text))
+    await runtime.qdrantClient.upsertDocumentChunks(qdrantCollectionName, result.chunks, vectors)
+
+    return {
+      ...result,
+      document: withIndexPipelineMessage(
+        result.document,
+        `Indexed ${result.chunks.length} chunks locally and in Qdrant`,
+      ),
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Vector index failed'
+    return {
+      ...result,
+      document: withIndexPipelineMessage(
+        result.document,
+        `Indexed ${result.chunks.length} chunks locally. Vector index failed: ${message}`,
+      ),
+    }
+  }
+}
+
+async function searchVectorCandidates(data: StoreData, userId: string, question: string): Promise<RankedChunk[]> {
+  const runtime = createVectorRuntime(data, userId)
+  if (!runtime.ready) {
+    throw new Error(runtime.warning)
+  }
+
+  const queryVector = await runtime.embeddingProvider.embedText(question)
+  return runtime.qdrantClient.searchSimilarChunks(
+    qdrantCollectionName,
+    queryVector,
+    vectorSearchLimit,
+    userId,
+  )
+}
+
+function withIndexPipelineMessage(document: DocumentRecord, message: string): DocumentRecord {
+  const pipeline = document.pipeline?.length ? document.pipeline : createPipelineSteps()
+
+  return {
+    ...document,
+    pipeline: pipeline.map((step) =>
+      step.id === 'index'
+        ? { ...step, message }
+        : step,
+    ),
+  }
 }
 
 function getRerankerServiceForMode(data: StoreData, userId: string, mode: AgentMode): RerankerServiceSettings | undefined {
@@ -1100,7 +1270,10 @@ async function main() {
     })
 
     const processedResults = await Promise.all(
-      uploadedDocuments.map((document) => processDocument(document, textRoot)),
+      uploadedDocuments.map(async (document) => {
+        const result = await processDocument(document, textRoot)
+        return indexPipelineResultInVectorStore(data, user.id, result)
+      }),
     )
     const processedDocuments = processedResults.map((result) => result.document)
     const nextChunksByDocumentId = { ...data.chunksByDocumentId }
@@ -1142,7 +1315,11 @@ async function main() {
       error: undefined,
       updatedAt: new Date().toISOString(),
     }
-    const result = await processDocument(processingDocument, textRoot)
+    const result = await indexPipelineResultInVectorStore(
+      data,
+      user.id,
+      await processDocument(processingDocument, textRoot),
+    )
 
     await store.write({
       ...data,
@@ -1197,10 +1374,32 @@ async function main() {
     const chunks = Object.values(data.chunksByDocumentId)
       .flat()
       .filter((chunk) => chunk.userId === user.id)
-    let rankedChunks = selectAnswerCandidates(question, chunks, rerankResultLimit)
+    let retrievalCandidates = buildRerankCandidates(question, chunks)
+    let rankedChunks = retrievalCandidates.slice(0, rerankResultLimit)
     let engine: AskEngine = 'local-retrieval'
-    let warning: string | undefined
+    const warnings: string[] = []
     const rerankerService = getRerankerServiceForMode(data, user.id, mode)
+
+    if (chunks.length && mode === 'cloud') {
+      try {
+        const vectorCandidates = await searchVectorCandidates(data, user.id, question)
+        if (vectorCandidates.length) {
+          retrievalCandidates = vectorCandidates
+          rankedChunks = vectorCandidates.slice(0, rerankResultLimit)
+          engine = 'qdrant-vector'
+        } else {
+          warnings.push(ruQuestion
+            ? 'Vector search не вернул кандидатов, использован локальный поиск.'
+            : 'Vector search returned no candidates, local retrieval was used.')
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Vector search failed'
+        warnings.push(ruQuestion
+          ? `Vector search недоступен: ${message}. Использован локальный поиск.`
+          : `Vector search is unavailable: ${message}. Local retrieval was used.`)
+        app.log.warn({ warning: message }, 'Vector search fallback to local retrieval')
+      }
+    }
 
     if (rerankerService && chunks.length) {
       try {
@@ -1208,43 +1407,44 @@ async function main() {
         const sharedProxy = getSharedProxyUrl(getProxySettings(data, user.id))
 
         if (!rerankerService.enabled && mode === 'local') {
-          warning = ruQuestion
+          warnings.push(ruQuestion
             ? 'Выбран локальный режим, но Local TEI выключен в настройках.'
-            : 'Local mode is selected, but Local TEI is disabled in settings.'
+            : 'Local mode is selected, but Local TEI is disabled in settings.')
         } else if (!apiKey && serviceRequiresApiKey(rerankerService.provider)) {
-          warning = ruQuestion
+          warnings.push(ruQuestion
             ? `${rerankerService.label} включён, но API key не добавлен.`
-            : `${rerankerService.label} is enabled, but API key is missing.`
+            : `${rerankerService.label} is enabled, but API key is missing.`)
         } else if (proxyAppliesTo(rerankerService.provider) && sharedProxy.error) {
-          warning = sharedProxy.error
+          warnings.push(sharedProxy.error)
         } else {
           rankedChunks = await rerankWithProvider(
             rerankerService,
             apiKey,
             proxyAppliesTo(rerankerService.provider) ? sharedProxy.url : undefined,
             question,
-            buildRerankCandidates(question, chunks),
+            retrievalCandidates,
           )
           engine = `${rerankerService.provider}-rerank`
         }
       } catch (error) {
-        warning = mode === 'local' && rerankerService.provider === 'tei'
+        const warning = mode === 'local' && rerankerService.provider === 'tei'
           ? ruQuestion
             ? 'Local TEI не отвечает. Запустите TEI по Base URL из настроек или переключитесь на Облачный режим.'
             : 'Local TEI is not responding. Start TEI at the configured Base URL or switch to Cloud mode.'
           : error instanceof Error
             ? error.message
             : `${rerankerService.label} failed`
+        warnings.push(warning)
         app.log.warn({ provider: rerankerService.provider, warning }, 'Reranker fallback to local retrieval')
       }
     } else if (chunks.length && mode === 'cloud') {
-      warning = ruQuestion
+      warnings.push(ruQuestion
         ? 'Выбран облачный режим, но облачный reranker не настроен.'
-        : 'Cloud mode is selected, but no cloud reranker is configured.'
+        : 'Cloud mode is selected, but no cloud reranker is configured.')
     } else if (chunks.length && mode === 'local') {
-      warning = ruQuestion
+      warnings.push(ruQuestion
         ? 'Выбран локальный режим, но Local TEI не настроен.'
-        : 'Local mode is selected, but Local TEI is not configured.'
+        : 'Local mode is selected, but Local TEI is not configured.')
     }
 
     const result = answerQuestion(question, chunks, rankedChunks)
@@ -1254,7 +1454,7 @@ async function main() {
       citations: result.citations.map(publicCitation),
       engine,
       mode,
-      warning,
+      warning: warnings.length ? warnings.join(' ') : undefined,
     }
   })
 

@@ -47,6 +47,16 @@ Definition of Done:
 - rerank: Cohere, Voyage, Jina или Local TEI;
 - answer generation: OpenAI Responses API или локальный LLM в Локальном режиме.
 
+Текущий slice:
+
+- embeddings берутся через OpenAI-compatible API;
+- чанки пишутся в Qdrant через `upsert`;
+- поиск идёт через Qdrant `search`;
+- сверху результатов работает reranker;
+- если retrieval недоступен, система деградирует в fallback-режим.
+
+Это базовый production-срез для следующего шага: сначала стабильный vector retrieval, потом уже worker, OCR и остальная обвязка.
+
 Порядок внедрения:
 
 1. Добавить модуль embeddings + Qdrant indexing/search.

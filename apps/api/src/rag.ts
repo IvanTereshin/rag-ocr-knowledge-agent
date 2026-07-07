@@ -4,6 +4,7 @@ const defaultRequestTimeoutMs = 10_000
 
 type JsonRecord = Record<string, unknown>
 type HeadersRecord = Record<string, string>
+type FetchFunction = (url: string, init: RequestInit) => Promise<Response>
 
 type RequestInitLike = Omit<RequestInit, 'body' | 'headers'> & {
   body?: string
@@ -48,6 +49,7 @@ export type EmbeddingProviderConfig = {
   timeoutMs?: number
   dimensions?: number
   user?: string
+  fetch?: FetchFunction
 }
 
 export type QdrantClientConfig = {
@@ -55,6 +57,7 @@ export type QdrantClientConfig = {
   apiKey?: string
   headers?: HeadersRecord
   timeoutMs?: number
+  fetch?: FetchFunction
 }
 
 export type QdrantPointPayload = DocumentChunkRecord
@@ -149,7 +152,7 @@ export async function ensureCollection(
   const response = await requestJson(qdrantCollectionUrl(config.baseUrl, normalizedCollectionName), {
     method: 'GET',
     headers: qdrantHeaders(config.apiKey, config.headers),
-  }, config.timeoutMs)
+  }, config.timeoutMs, config.fetch)
 
   if (response.ok) {
     const payload = (await readJsonResponse(response)) as QdrantCollectionResponse
@@ -182,7 +185,7 @@ export async function ensureCollection(
         distance: 'Cosine',
       },
     }),
-  }, config.timeoutMs)
+  }, config.timeoutMs, config.fetch)
 
   if (!createResponse.ok) {
     const payload = await readJsonResponse(createResponse)
@@ -225,7 +228,7 @@ export async function upsertDocumentChunks(
     body: JSON.stringify({
       points,
     }),
-  }, config.timeoutMs)
+  }, config.timeoutMs, config.fetch)
 
   if (!response.ok) {
     const payload = await readJsonResponse(response)
@@ -269,7 +272,7 @@ export async function searchSimilarChunks(
           }
         : undefined,
     }),
-  }, config.timeoutMs)
+  }, config.timeoutMs, config.fetch)
 
   const payload = (await readJsonResponse(response)) as QdrantSearchResponse
   if (!response.ok) {
@@ -306,7 +309,7 @@ async function requestEmbeddings(config: EmbeddingProviderConfig, inputs: string
       ...(config.dimensions ? { dimensions: config.dimensions } : {}),
       ...(config.user ? { user: config.user } : {}),
     }),
-  }, config.timeoutMs)
+  }, config.timeoutMs, config.fetch)
 
   const payload = (await readJsonResponse(response)) as OpenAIEmbeddingResponse
   if (!response.ok) {
@@ -316,7 +319,12 @@ async function requestEmbeddings(config: EmbeddingProviderConfig, inputs: string
   return parseEmbeddingVectors(payload)
 }
 
-async function requestJson(url: string, init: RequestInitLike, timeoutMs = defaultRequestTimeoutMs): Promise<Response> {
+async function requestJson(
+  url: string,
+  init: RequestInitLike,
+  timeoutMs = defaultRequestTimeoutMs,
+  fetchFunction: FetchFunction = fetch,
+): Promise<Response> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   const requestInit: RequestInit = {
@@ -325,7 +333,7 @@ async function requestJson(url: string, init: RequestInitLike, timeoutMs = defau
   }
 
   try {
-    return await fetch(url, requestInit)
+    return await fetchFunction(url, requestInit)
   } finally {
     clearTimeout(timer)
   }
