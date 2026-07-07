@@ -21,10 +21,12 @@ import {
   verifyPassword,
 } from './security.js'
 import { answerQuestion, createPipelineSteps, processDocument, readDocumentText, selectAnswerCandidates } from './pipeline.js'
-import type { PipelineResult, RankedChunk } from './pipeline.js'
-import { createEmbeddingProvider, createQdrantClient } from './rag.js'
+import type { RankedChunk } from './pipeline.js'
 import { validateUploadFile } from './upload-validation.js'
+import { createJobQueueFromEnv } from './queue.js'
+import { createSourceObjectStorageFromEnv } from './object-storage.js'
 import { createStoreFromEnv } from './store.js'
+import { indexPipelineResultInVectorStore, searchVectorCandidatesInVectorStore } from './vector-indexing.js'
 import type {
   DocumentChunkRecord,
   DocumentRecord,
@@ -42,6 +44,8 @@ const sessionTtlMs = 1000 * 60 * 60 * 24 * 7
 const dataDir = process.env.DATA_DIR ?? join(process.cwd(), 'data')
 const uploadRoot = join(dataDir, 'uploads')
 const textRoot = join(dataDir, 'extracted-text')
+const pipelineVersion = process.env.DOCUMENT_PIPELINE_VERSION?.trim() || '1'
+const processingMode = process.env.PROCESSING_MODE?.trim() === 'queued' ? 'queued' : 'inline'
 const validationTimeoutMs = 8000
 const maxRerankCandidates = 12
 const rerankResultLimit = 3
@@ -59,11 +63,10 @@ const csrfHeaderName = (process.env.CSRF_HEADER_NAME?.trim() || 'x-csrf-token').
 const allowedCorsOrigins = parseCsvEnv(process.env.CORS_ORIGINS)
 const trustProxy = parseBooleanEnv(process.env.TRUST_PROXY, false)
 const appLogLevel = process.env.APP_LOG_LEVEL?.trim() || 'info'
-const embeddingModel = process.env.EMBEDDING_MODEL?.trim() || 'text-embedding-3-small'
-const qdrantCollectionName = process.env.QDRANT_COLLECTION?.trim() || 'rag_ocr_chunks'
 const vectorSearchLimit = parsePositiveInteger(process.env.VECTOR_SEARCH_LIMIT, maxRerankCandidates)
-const ragRequestTimeoutMs = parsePositiveInteger(process.env.RAG_REQUEST_TIMEOUT_MS, 15_000)
 const store = createStoreFromEnv()
+const jobQueue = createJobQueueFromEnv()
+const sourceStorage = createSourceObjectStorageFromEnv(dataDir)
 const proxyAgents = new Map<string, ProxyAgent>()
 const rerankerProviders = ['cohere', 'voyage', 'jina', 'tei'] as const
 type RerankerProvider = (typeof rerankerProviders)[number]
@@ -302,14 +305,6 @@ async function fetchWithTimeout(url: string, init: ProxyFetchInit = {}, proxyUrl
   } finally {
     clearTimeout(timeout)
   }
-}
-
-function fetchWithOptionalProxy(proxyUrl?: string) {
-  return (url: string, init: RequestInit) =>
-    undiciFetch(url, {
-      ...init,
-      ...(proxyUrl ? { dispatcher: proxyAgentFor(proxyUrl) } : {}),
-    } as Parameters<typeof undiciFetch>[1]) as Promise<Response>
 }
 
 async function readResponseText(response: Response) {
@@ -666,156 +661,8 @@ function getServiceSecret(service: ServiceSettingsRecord) {
   return decryptSecret(service.secret)
 }
 
-type VectorRuntime = {
-  ready: true
-  embeddingProvider: ReturnType<typeof createEmbeddingProvider>
-  qdrantClient: ReturnType<typeof createQdrantClient>
-} | {
-  ready: false
-  warning: string
-}
-
-function getServiceForProvider(data: StoreData, userId: string, provider: ServiceProvider) {
-  return getServices(data, userId).find((service) => service.provider === provider)
-}
-
-function createVectorRuntime(data: StoreData, userId: string): VectorRuntime {
-  const openaiService = getServiceForProvider(data, userId, 'openai')
-  const qdrantService = getServiceForProvider(data, userId, 'qdrant')
-
-  if (!openaiService?.enabled) {
-    return { ready: false, warning: 'OpenAI embeddings service is disabled' }
-  }
-
-  if (!qdrantService?.enabled) {
-    return { ready: false, warning: 'Qdrant vector store is disabled' }
-  }
-
-  let openaiApiKey: string | undefined
-  let qdrantApiKey: string | undefined
-  try {
-    openaiApiKey = getServiceSecret(openaiService)
-    qdrantApiKey = getServiceSecret(qdrantService)
-  } catch {
-    return { ready: false, warning: 'Stored vector service key could not be decrypted' }
-  }
-
-  if (!openaiApiKey) {
-    return { ready: false, warning: 'OpenAI API key is missing for embeddings' }
-  }
-
-  try {
-    new URL(openaiService.baseUrl)
-    new URL(qdrantService.baseUrl)
-  } catch {
-    return { ready: false, warning: 'Vector service Base URL is invalid' }
-  }
-
-  const sharedProxy = getSharedProxyUrl(getProxySettings(data, userId))
-  if (sharedProxy.error) {
-    return { ready: false, warning: sharedProxy.error }
-  }
-
-  return {
-    ready: true,
-    embeddingProvider: createEmbeddingProvider({
-      baseUrl: openaiService.baseUrl,
-      model: embeddingModel,
-      apiKey: openaiApiKey,
-      timeoutMs: ragRequestTimeoutMs,
-      fetch: fetchWithOptionalProxy(sharedProxy.url),
-    }),
-    qdrantClient: createQdrantClient({
-      baseUrl: qdrantService.baseUrl,
-      apiKey: qdrantApiKey,
-      timeoutMs: ragRequestTimeoutMs,
-    }),
-  }
-}
-
-async function embedTextsInBatches(
-  embeddingProvider: ReturnType<typeof createEmbeddingProvider>,
-  texts: string[],
-) {
-  const batchSize = 16
-  const vectors: number[][] = []
-
-  for (let index = 0; index < texts.length; index += batchSize) {
-    vectors.push(...await embeddingProvider.embedTexts(texts.slice(index, index + batchSize)))
-  }
-
-  return vectors
-}
-
-async function indexPipelineResultInVectorStore(
-  data: StoreData,
-  userId: string,
-  result: PipelineResult,
-): Promise<PipelineResult> {
-  if (result.document.status !== 'ready' || !result.chunks.length) {
-    return result
-  }
-
-  const runtime = createVectorRuntime(data, userId)
-  if (!runtime.ready) {
-    return {
-      ...result,
-      document: withIndexPipelineMessage(
-        result.document,
-        `Indexed ${result.chunks.length} chunks locally. Vector index skipped: ${runtime.warning}`,
-      ),
-    }
-  }
-
-  try {
-    const vectors = await embedTextsInBatches(runtime.embeddingProvider, result.chunks.map((chunk) => chunk.text))
-    await runtime.qdrantClient.upsertDocumentChunks(qdrantCollectionName, result.chunks, vectors)
-
-    return {
-      ...result,
-      document: withIndexPipelineMessage(
-        result.document,
-        `Indexed ${result.chunks.length} chunks locally and in Qdrant`,
-      ),
-    }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Vector index failed'
-    return {
-      ...result,
-      document: withIndexPipelineMessage(
-        result.document,
-        `Indexed ${result.chunks.length} chunks locally. Vector index failed: ${message}`,
-      ),
-    }
-  }
-}
-
 async function searchVectorCandidates(data: StoreData, userId: string, question: string): Promise<RankedChunk[]> {
-  const runtime = createVectorRuntime(data, userId)
-  if (!runtime.ready) {
-    throw new Error(runtime.warning)
-  }
-
-  const queryVector = await runtime.embeddingProvider.embedText(question)
-  return runtime.qdrantClient.searchSimilarChunks(
-    qdrantCollectionName,
-    queryVector,
-    vectorSearchLimit,
-    userId,
-  )
-}
-
-function withIndexPipelineMessage(document: DocumentRecord, message: string): DocumentRecord {
-  const pipeline = document.pipeline?.length ? document.pipeline : createPipelineSteps()
-
-  return {
-    ...document,
-    pipeline: pipeline.map((step) =>
-      step.id === 'index'
-        ? { ...step, message }
-        : step,
-    ),
-  }
+  return searchVectorCandidatesInVectorStore(data, userId, question, vectorSearchLimit)
 }
 
 function getRerankerServiceForMode(data: StoreData, userId: string, mode: AgentMode): RerankerServiceSettings | undefined {
@@ -951,6 +798,10 @@ function safeOriginalName(filename: string) {
     .trim()
 
   return safeName || 'document'
+}
+
+function sourceObjectKey(userId: string, documentId: string, filename: string) {
+  return `users/${userId}/documents/${documentId}/source/${filename}`
 }
 
 async function pruneExpiredSessions(data: StoreData) {
@@ -1168,6 +1019,10 @@ function csrfValidationError(data: StoreData, request: FastifyRequest) {
 
 async function main() {
   assertAppSecretIsSafe()
+  if (processingMode === 'queued' && !process.env.REDIS_URL?.trim()) {
+    throw new Error('REDIS_URL is required when PROCESSING_MODE=queued')
+  }
+
   const app = fastify({
     trustProxy,
     logger: {
@@ -1176,6 +1031,8 @@ async function main() {
     },
   })
   app.addHook('onClose', async () => {
+    await jobQueue.close()
+    await sourceStorage.close?.()
     await store.close()
   })
 
@@ -1478,6 +1335,7 @@ async function main() {
       const storedName = `${Date.now()}-${index}-${randomUUID()}${extension}`
       const storagePath = join(uploadDir, storedName)
       const fileBuffer = readFileSync(file.filepath)
+      const documentId = randomUUID()
       const validation = validateUploadFile({
         filename: originalName,
         mimetype: file.mimetype,
@@ -1490,22 +1348,75 @@ async function main() {
       }
 
       writeFileSync(storagePath, fileBuffer)
+      const storageKey = sourceObjectKey(user.id, documentId, originalName)
+      await sourceStorage.put(storageKey, fileBuffer, file.mimetype || 'application/octet-stream')
 
       uploadedDocuments.push({
-        id: randomUUID(),
+        id: documentId,
         userId: user.id,
         fileName: storedName,
         originalName,
         fileType: validation.fileType.toUpperCase(),
         mimeType: file.mimetype || 'application/octet-stream',
         sizeBytes: fileBuffer.byteLength,
-        status: 'processing',
+        status: processingMode === 'queued' ? 'queued' : 'processing',
         storagePath,
+        storageKey,
         chunkCount: 0,
         pipeline: createPipelineSteps(),
+        queuedAt: processingMode === 'queued' ? now : undefined,
+        pipelineVersion,
         createdAt: now,
         updatedAt: now,
       })
+    }
+
+    const currentDocuments = data.documentsByUserId[user.id] ?? []
+
+    if (processingMode === 'queued') {
+      await store.write({
+        ...data,
+        documentsByUserId: {
+          ...data.documentsByUserId,
+          [user.id]: [...uploadedDocuments, ...currentDocuments],
+        },
+      })
+
+      const queuedDocuments: DocumentRecord[] = []
+      for (const document of uploadedDocuments) {
+        if (!document.storageKey) {
+          return reply.code(500).send({ error: 'Document source was not saved to object storage' })
+        }
+
+        const job = await jobQueue.enqueue({
+          documentId: document.id,
+          userId: user.id,
+          sourceKey: document.storageKey,
+          sourcePath: document.storagePath,
+          attempts: parsePositiveInteger(process.env.WORKER_JOB_ATTEMPTS, 5),
+          pipelineVersion,
+        })
+
+        queuedDocuments.push({
+          ...document,
+          jobId: job.id,
+          updatedAt: new Date().toISOString(),
+        })
+      }
+
+      const freshData = await store.read()
+      const freshDocuments = freshData.documentsByUserId[user.id] ?? []
+      const queuedById = new Map(queuedDocuments.map((document) => [document.id, document]))
+
+      await store.write({
+        ...freshData,
+        documentsByUserId: {
+          ...freshData.documentsByUserId,
+          [user.id]: freshDocuments.map((document) => queuedById.get(document.id) ?? document),
+        },
+      })
+
+      return reply.code(201).send({ documents: queuedDocuments.map(publicDocument) })
     }
 
     const processedResults = await Promise.all(
@@ -1520,7 +1431,6 @@ async function main() {
       nextChunksByDocumentId[result.document.id] = result.chunks
     })
 
-    const currentDocuments = data.documentsByUserId[user.id] ?? []
     await store.write({
       ...data,
       documentsByUserId: {
@@ -1545,6 +1455,64 @@ async function main() {
     const document = documents.find((item) => item.id === documentId)
     if (!document) {
       return reply.code(404).send({ error: 'Document not found' })
+    }
+
+    if (processingMode === 'queued') {
+      const now = new Date().toISOString()
+      const sourceBytes = readFileSync(document.storagePath)
+      const storageKey = document.storageKey ?? sourceObjectKey(user.id, document.id, document.originalName)
+      await sourceStorage.put(storageKey, sourceBytes, document.mimeType)
+
+      const queuedDocument: DocumentRecord = {
+        ...document,
+        status: 'queued',
+        storageKey,
+        pipeline: createPipelineSteps(),
+        chunkCount: 0,
+        error: undefined,
+        queuedAt: now,
+        pipelineVersion,
+        updatedAt: now,
+      }
+
+      await store.write({
+        ...data,
+        documentsByUserId: {
+          ...data.documentsByUserId,
+          [user.id]: documents.map((item) => (item.id === queuedDocument.id ? queuedDocument : item)),
+        },
+        chunksByDocumentId: {
+          ...data.chunksByDocumentId,
+          [queuedDocument.id]: [],
+        },
+      })
+
+      const job = await jobQueue.enqueue({
+        documentId: queuedDocument.id,
+        userId: user.id,
+        sourceKey: storageKey,
+        sourcePath: queuedDocument.storagePath,
+        attempts: parsePositiveInteger(process.env.WORKER_JOB_ATTEMPTS, 5),
+        pipelineVersion,
+      })
+
+      const freshData = await store.read()
+      const freshDocuments = freshData.documentsByUserId[user.id] ?? []
+      const withJobId: DocumentRecord = {
+        ...queuedDocument,
+        jobId: job.id,
+        updatedAt: new Date().toISOString(),
+      }
+
+      await store.write({
+        ...freshData,
+        documentsByUserId: {
+          ...freshData.documentsByUserId,
+          [user.id]: freshDocuments.map((item) => (item.id === withJobId.id ? withJobId : item)),
+        },
+      })
+
+      return { document: publicDocument(withJobId) }
     }
 
     const processingDocument: DocumentRecord = {

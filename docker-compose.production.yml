@@ -12,9 +12,14 @@ services:
       DATA_DIR: /app/data
       WEB_DIST_DIR: /app/apps/web/dist
       DATABASE_URL: postgres://rag_ocr:${POSTGRES_PASSWORD}@postgres:5432/rag_ocr
+      PROCESSING_MODE: ${PROCESSING_MODE:-queued}
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_started
+      minio:
+        condition: service_started
       qdrant:
         condition: service_started
       tei:
@@ -29,6 +34,32 @@ services:
       timeout: 10s
       retries: 3
       start_period: 20s
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ["node", "dist/worker.js"]
+    env_file:
+      - .env.production
+    environment:
+      NODE_ENV: production
+      DATA_DIR: /app/data
+      DATABASE_URL: postgres://rag_ocr:${POSTGRES_PASSWORD}@postgres:5432/rag_ocr
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      minio:
+        condition: service_started
+      qdrant:
+        condition: service_started
+      tei:
+        condition: service_started
+    volumes:
+      - app_data:/app/data
 
   postgres:
     image: postgres:16-alpine

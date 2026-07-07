@@ -1,188 +1,46 @@
-# Production worker + storage plan
+# Production worker + storage
 
-Этот документ описывает следующий production-slice для документационного потока.  
-Текущий статус: уже есть каркас для Redis + MinIO + queue/storage interfaces, но upload еще не переведен полностью на worker-flow.
-Цель: постепенно вынести обработку файлов из HTTP-запроса в фоновый worker и убрать зависимость от локального диска приложения, не ломая текущий runtime API в этом шаге.
+Этот документ описывает текущий worker/storage runtime. Он уже не является только планом: API умеет ставить документы в очередь, а отдельный worker обрабатывает jobs.
 
-## 1. Что есть сейчас
+## Текущий статус
 
-По коду сейчас поток такой:
+В production-режиме используется такой поток:
 
 ```text
 POST /api/documents
   -> Fastify принимает multipart
-  -> файл пишется в DATA_DIR/uploads/<userId>/
-  -> сразу вызывается processDocument(...)
-  -> текст пишется в DATA_DIR/extracted-text/<userId>/<documentId>.txt
-  -> chunks кладутся в jsonb store в PostgreSQL
-  -> ответ возвращается только после завершения обработки
+  -> source сохраняется в object storage adapter
+  -> document получает статус queued
+  -> job попадает в Redis queue
+  -> worker запускает OCR / parsing / chunking
+  -> worker сохраняет chunks и статус ready / failed
+  -> frontend polling обновляет список документов
 ```
 
-Где это живет:
+Переключатель режима:
 
-- `apps/api/src/server.ts`
-  - upload endpoint: `POST /api/documents`
-  - manual reprocess: `POST /api/documents/:documentId/process`
-  - text read endpoint: `GET /api/documents/:documentId/text`
-- `apps/api/src/pipeline.ts`
-  - `processDocument(...)`
-  - OCR/text extraction, chunking, index creation
-- `apps/api/src/store.ts`
-  - `DocumentRecord`, `DocumentChunkRecord`
-  - PostgreSQL `rag_ocr_app_state` через `DATABASE_URL`
-
-Сейчас это удобно для MVP, но для production есть 3 проблемы:
-
-1. HTTP-запрос долго держит соединение, пока идет OCR и chunking.
-2. Файл и derived-артефакты лежат на диске одного контейнера.
-3. При рестарте/масштабировании приложения обработка и storage становятся хрупкими.
-
-## 2. Целевой поток
-
-Нужен такой путь:
-
-```text
-API upload
-  -> object storage
-  -> queue
-  -> worker
-  -> OCR / parse / chunk / index
-  -> PostgreSQL metadata + chunks
-  -> API reads status and results
+```bash
+PROCESSING_MODE=queued
 ```
 
-### Базовая идея
+Если нужен старый dev-путь без Redis и worker:
 
-- API принимает файл и сразу отдает `queued` или `uploaded`.
-- Сам файл сохраняется в S3-compatible storage, лучше MinIO для self-host.
-- API кладет job в очередь.
-- Worker забирает job, делает OCR и chunking, сохраняет derived data и обновляет документ.
-- API только читает статус и результат, но не выполняет тяжелую обработку.
-
-### Что уже сделано в этом slice
-
-- подготовлен каркас очереди на Redis;
-- подготовлен каркас object storage на MinIO;
-- выделяются интерфейсы для queue/storage, чтобы потом не переписывать API заново;
-- текущий upload-путь пока остается частично синхронным и не переключен целиком на worker.
-
-## 3. Почему Redis + BullMQ
-
-Для этого проекта самый практичный вариант - `Redis + BullMQ`.
-
-Почему:
-
-- нативно подходит для Node.js;
-- просто связать с Fastify worker;
-- есть retry, backoff, concurrency, delayed jobs;
-- удобно разделить `upload` и `process` без большой перестройки кода;
-- потом легко добавить отдельный worker контейнер.
-
-Альтернатива вроде RabbitMQ тоже рабочая, но для текущего стека она тяжелее по интеграции без явной пользы.
-
-## 4. Storage layout в S3 / MinIO
-
-Рекомендуемый layout - один bucket или два bucket'а, но с одинаковой логикой ключей.
-
-### Вариант A: один bucket
-
-Bucket: `rag-ocr`
-
-```text
-users/{userId}/documents/{documentId}/source/{originalFileName}
-users/{userId}/documents/{documentId}/derived/text.txt
-users/{userId}/documents/{documentId}/derived/ocr.json
-users/{userId}/documents/{documentId}/derived/chunks.json
-users/{userId}/documents/{documentId}/derived/meta.json
-users/{userId}/documents/{documentId}/logs/worker.log
+```bash
+PROCESSING_MODE=inline
 ```
 
-### Вариант B: два bucket'а
+## Компоненты
 
-- `rag-ocr-source`
-- `rag-ocr-derived`
+- `apps/api/src/server.ts` - upload endpoint, manual reprocess endpoint, enqueue jobs.
+- `apps/api/src/worker.ts` - отдельный worker process для обработки документов.
+- `apps/api/src/queue.ts` - Redis-backed queue и in-memory/inline fallback.
+- `apps/api/src/object-storage.ts` - local storage adapter и S3-compatible MinIO adapter.
+- `apps/api/src/pipeline.ts` - extraction, OCR fallback, chunking.
+- `apps/web/src/App.tsx` - polling статусов `queued` / `processing`.
 
-Плюс тот же путь внутри bucket'ов.
+## Очередь
 
-### Что хранить
-
-- `source` - оригинальный файл, который загрузил пользователь.
-- `text.txt` - нормализованный извлеченный текст.
-- `ocr.json` - результат OCR/парсинга, если нужен для диагностики.
-- `chunks.json` - список чанков и их metadata.
-- `meta.json` - служебные поля: версия пайплайна, engine, время обработки, ошибки.
-
-### Что лучше не хранить в object storage
-
-- секреты;
-- session data;
-- runtime settings;
-- все, что уже нормально живет в PostgreSQL.
-
-## 5. Статусы документа
-
-Текущие статусы в коде уже есть:
-
-```ts
-'uploaded' | 'queued' | 'processing' | 'ready' | 'failed'
-```
-
-Я бы закрепил такую семантику:
-
-- `uploaded` - файл принят API, но job еще не создан или еще не подтвержден.
-- `queued` - job успешно поставлен в очередь, worker еще не начал работу.
-- `processing` - worker уже обрабатывает документ.
-- `ready` - текст, chunks и индекс готовы.
-- `failed` - обработка завершилась с ошибкой после всех retry.
-
-### Retry behavior
-
-Важно не смешивать retry внутри очереди и финальный статус документа.
-
-- Пока job retry'ится, документ остается в `queued` или `processing`.
-- Количество попыток задается на уровне queue job.
-- После последнего неудачного retry документ переводится в `failed`.
-- В `error` кладется короткое понятное сообщение для UI.
-
-### Что делать с исходником при ошибке
-
-Не удалять сразу.
-
-Полезно сохранить:
-
-- оригинальный файл;
-- последний error;
-- worker trace id / job id;
-- номер попытки;
-- timestamps.
-
-Так проще чинить проблемные документы без повторной загрузки.
-
-## 6. Как должен работать worker
-
-Worker должен делать только тяжелую часть пайплайна:
-
-1. скачать source файл из object storage;
-2. определить тип файла;
-3. запустить OCR или text extraction;
-4. сохранить нормализованный текст;
-5. сделать chunking;
-6. подготовить chunks для поиска;
-7. сохранить результат;
-8. обновить статус документа в PostgreSQL.
-
-### Хорошая практика
-
-- Worker должен быть идемпотентным.
-- Если job пришел второй раз, он не должен плодить дубликаты chunks.
-- Перед записью новых chunks лучше удалять старые по `documentId`.
-- Версию pipeline стоит сохранять отдельно, чтобы понимать, чем был обработан документ.
-
-## 7. Какие ENV понадобятся
-
-Ниже не код, а список переменных, которые стоит заранее заложить в `.env.example` и `.env.production.example`, когда дойдем до implementation slice.
-
-### Queue / worker
+Production queue работает через Redis:
 
 ```bash
 REDIS_URL=redis://redis:6379
@@ -191,7 +49,11 @@ WORKER_JOB_ATTEMPTS=5
 WORKER_JOB_BACKOFF_MS=5000
 ```
 
-### Object storage
+Важно: при `PROCESSING_MODE=queued` API fail-fast стартует только с `REDIS_URL`. Это защищает production от тихого запуска без очереди.
+
+## Object storage
+
+Source-файлы пишутся через общий adapter. Для production можно использовать MinIO или другой S3-compatible сервис:
 
 ```bash
 S3_ENDPOINT=http://minio:9000
@@ -203,175 +65,62 @@ S3_BUCKET_DERIVED=rag-ocr-derived
 S3_FORCE_PATH_STYLE=true
 ```
 
-### Полезные служебные
+Если S3-настройки не заданы, adapter использует локальную папку внутри `DATA_DIR`. Это удобно для local dev, но для настоящего production лучше MinIO/S3.
 
-```bash
-WORKER_LOG_LEVEL=info
-DOCUMENT_PIPELINE_VERSION=1
+Рекомендуемый layout ключей:
+
+```text
+users/{userId}/documents/{documentId}/source/{originalFileName}
+users/{userId}/documents/{documentId}/derived/text.txt
+users/{userId}/documents/{documentId}/derived/chunks.json
 ```
 
-## 8. Краткий runbook для включения worker позже
+## Статусы документа
 
-Этот блок нужен для следующего шага, когда runtime-код уже будет готов принимать worker.
+- `queued` - job создан, worker ещё не начал обработку.
+- `processing` - worker уже работает с документом.
+- `ready` - текст и chunks сохранены.
+- `failed` - обработка завершилась ошибкой после попыток.
 
-### Что включать
+Worker обновляет `jobId`, `queuedAt`, `processingStartedAt`, `processedAt`, `pipelineVersion` и `error`. Старые chunks заменяются по `documentId`, поэтому повторная обработка не должна плодить дубликаты.
 
-1. Поднять Redis и MinIO в production stack.
-2. Заполнить worker ENV из списка выше.
-3. Включить worker service в compose или отдельном деплойменте.
-4. Перевести upload на постановку job в очередь, если это еще не сделано.
-5. Проверить, что API больше не ждет OCR/chunking в HTTP request.
+## Запуск
 
-### Что проверить
+Локально для проверки queued-flow:
 
-- upload быстро возвращает `queued` или `uploaded`;
-- job реально появляется в Redis queue;
-- worker берет job и меняет статус на `processing`;
-- после завершения документ получает `ready`;
-- при ошибке документ уходит в `failed`, а ошибка читается из metadata;
-- MinIO доступен по `S3_ENDPOINT`, и bucket'и созданы;
-- Redis доступен по `REDIS_URL`;
-- повторный старт worker не ломает уже поставленные jobs.
+```bash
+redis-server --port 6380 --save '' --appendonly no
+DATA_DIR=/tmp/rag-data PROCESSING_MODE=queued REDIS_URL=redis://127.0.0.1:6380 npm --prefix apps/api start
+DATA_DIR=/tmp/rag-data REDIS_URL=redis://127.0.0.1:6380 npm --prefix apps/api run worker
+```
 
-### Какие ENV должны быть заданы
+Production stack:
 
-- `REDIS_URL`
-- `WORKER_CONCURRENCY`
-- `WORKER_JOB_ATTEMPTS`
-- `WORKER_JOB_BACKOFF_MS`
-- `S3_ENDPOINT`
-- `S3_REGION`
-- `S3_ACCESS_KEY_ID`
-- `S3_SECRET_ACCESS_KEY`
-- `S3_BUCKET_SOURCE`
-- `S3_BUCKET_DERIVED`
-- `S3_FORCE_PATH_STYLE`
-- `WORKER_LOG_LEVEL`
-- `DOCUMENT_PIPELINE_VERSION`
+```bash
+cp .env.production.example .env.production
+docker compose --env-file .env.production -f docker-compose.production.yml up -d --build
+```
 
-## 9. Что менять потом по файлам
+## Известные ограничения
 
-Этот список нужен как карта для следующего implementation slice.
+- JSON store остаётся fallback для разработки; production должен использовать `DATABASE_URL`.
+- Для масштабирования API и worker нужен общий Postgres и общий object storage.
+- Vector indexing выполняется и в API inline-flow, и в worker queued-flow. Если vector store недоступен, pipeline сохраняет chunks и работает через degraded retrieval.
+- Derived artifacts пока в основном живут в `DATA_DIR`; следующий шаг - переносить text/chunks metadata в object storage или нормальные таблицы.
 
-### Core backend
+## Минимальная проверка
 
-- `apps/api/src/server.ts`
-  - убрать синхронную обработку из `POST /api/documents`
-  - вместо `processDocument(...)` только сохранять файл и ставить job
-  - обновлять статус `queued`
-  - оставить публичный контракт ответа максимально близким к текущему
+Перед деплоем проверьте:
 
-- `apps/api/src/pipeline.ts`
-  - оставить общую логику extraction/chunking
-  - позже вынести в shared worker-friendly модуль, если понадобится
+```bash
+npm run build
+docker compose --env-file .env.production -f docker-compose.production.yml config
+```
 
-- `apps/api/src/store.ts`
-  - расширить `DocumentRecord` служебными полями для queue/job tracking
-  - не ломать текущий jsonb формат без причины
+Smoke-flow:
 
-### New worker code
-
-- новый worker entrypoint, например `apps/worker/src/index.ts`
-- новый queue helper, например `apps/api/src/queue.ts` или общий модуль
-- новый storage adapter, например `apps/api/src/object-storage.ts`
-
-### Frontend
-
-- `apps/web/src/api.ts`
-- `apps/web/src/App.tsx`
-
-Там потом, скорее всего, понадобится только:
-
-- polling статусов;
-- более честный UI для `queued` / `processing`;
-- кнопка retry/reprocess.
-
-## 10. Какие API endpoints потом менять
-
-### Сразу после перехода на queue
-
-- `POST /api/documents`
-  - больше не делает OCR внутри запроса
-  - только upload + enqueue
-
-- `POST /api/documents/:documentId/process`
-  - станет повторным запуском job, а не прямым вызовом пайплайна
-
-### Позже, если будет нужно
-
-- `GET /api/documents`
-  - может начать возвращать job metadata: `attempts`, `lastErrorAt`, `jobId`
-
-- `GET /api/documents/:documentId/text`
-  - может читать `text.txt` из object storage, а не только из локального пути
-
-- `POST /api/ask`
-  - обычно менять не нужно сразу, но он должен фильтровать только `ready` документы
-
-## 11. Рекомендуемые этапы внедрения
-
-### Этап 1. Документ и договоренности
-
-Результат:
-
-- есть этот design doc;
-- понятны storage keys;
-- понятны статусы и retry rule;
-- понятны будущие файлы и endpoints.
-
-### Этап 2. Redis + MinIO как отдельные сервисы
-
-Результат:
-
-- в compose появляются `redis` и `minio`;
-- `app` пока работает как раньше;
-- можно проверить connectivity и credentials.
-
-### Этап 3. Worker без включения в основной поток
-
-Результат:
-
-- worker умеет брать job и запускать существующий `processDocument`;
-- API пока еще может оставить старый путь как fallback;
-- можно проверить только новый path на тестовом документе.
-
-### Этап 4. Перенос upload в object storage
-
-Результат:
-
-- source больше не лежит на локальном диске app;
-- `storagePath` заменяется на object key или storage descriptor;
-- текст и chunks тоже сохраняются через worker pipeline.
-
-### Этап 5. Полный switch
-
-Результат:
-
-- API не делает тяжелую обработку;
-- app можно масштабировать отдельно от worker;
-- storage и queue становятся production-ready.
-
-## 12. Минимальный критерий готовности текущего scaffolding-slice
-
-Этот slice можно считать удачным, если:
-
-- Redis и MinIO добавлены в production compose, но текущий upload-flow не сломан;
-- env для queue/storage заранее описаны;
-- есть TypeScript interfaces для queue и object storage;
-- текущий runtime API продолжает работать как раньше;
-- следующий slice может подключать worker без повторного проектирования storage keys и job payload.
-
-Полный worker-flow будет готов позже, когда:
-
-- upload не держит request до конца OCR;
-- source file сохраняется вне контейнера app;
-- worker может пережить рестарт без потери очереди;
-- failed document получает понятный `error`;
-- retry не создает дубликаты chunks.
-
-## 13. Что важно не сделать сейчас
-
-- Не переписывать весь pipeline сразу.
-- Не трогать `package.json`, `server.ts` и `store.ts` в этом шаге.
-- Не смешивать queue design с полной сменой vector store.
-- Не добавлять лишние runtime изменения, пока не готов worker slice.
+1. зарегистрироваться;
+2. загрузить `.txt`, `.pdf` или `.docx`;
+3. увидеть статус `queued`, затем `processing`, затем `ready`;
+4. задать вопрос по документу;
+5. проверить, что ответ содержит sources.

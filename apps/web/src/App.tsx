@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent, ComponentType, FormEvent } from 'react'
 import Bot from 'lucide-react/dist/esm/icons/bot.mjs'
 import Check from 'lucide-react/dist/esm/icons/check.mjs'
@@ -378,7 +378,30 @@ function App() {
   const [askResult, setAskResult] = useState<AskResponse | null>(null)
   const [askStatus, setAskStatus] = useState<'idle' | 'asking'>('idle')
   const [askError, setAskError] = useState('')
+  const documentsPollingTimeoutRef = useRef<number | null>(null)
   const t = copy[language]
+
+  const hasPendingDocuments = documents.some(
+    (document) => document.status === 'queued' || document.status === 'processing',
+  )
+
+  const clearDocumentsPolling = useCallback(() => {
+    if (documentsPollingTimeoutRef.current !== null) {
+      window.clearTimeout(documentsPollingTimeoutRef.current)
+      documentsPollingTimeoutRef.current = null
+    }
+  }, [])
+
+  const applyDocuments = useCallback((nextDocuments: UserDocument[]) => {
+    setDocuments(nextDocuments)
+    setSelectedDocumentId((current) => {
+      if (nextDocuments.some((document) => document.id === current)) {
+        return current
+      }
+
+      return nextDocuments[0]?.id ?? ''
+    })
+  }, [])
 
   useEffect(() => {
     let active = true
@@ -403,10 +426,12 @@ function App() {
 
   useEffect(() => {
     if (!user) {
+      clearDocumentsPolling()
       return
     }
 
     let active = true
+    clearDocumentsPolling()
     setDocumentsStatus('loading')
     setDocumentsError('')
 
@@ -414,14 +439,8 @@ function App() {
       .getDocuments()
       .then(({ documents: loadedDocuments }) => {
         if (!active) return
-        setDocuments(loadedDocuments)
-        setSelectedDocumentId((current) => {
-          if (loadedDocuments.some((document) => document.id === current)) {
-            return current
-          }
-
-          return loadedDocuments[0]?.id ?? ''
-        })
+        applyDocuments(loadedDocuments)
+        setDocumentsError('')
         setDocumentsStatus('ready')
       })
       .catch((error) => {
@@ -433,7 +452,49 @@ function App() {
     return () => {
       active = false
     }
-  }, [user])
+  }, [applyDocuments, clearDocumentsPolling, user])
+
+  useEffect(() => {
+    if (authStatus !== 'authenticated' || !user || !hasPendingDocuments) {
+      clearDocumentsPolling()
+      return
+    }
+
+    let active = true
+
+    const scheduleNextPoll = () => {
+      if (!active) {
+        return
+      }
+
+      clearDocumentsPolling()
+      documentsPollingTimeoutRef.current = window.setTimeout(async () => {
+        try {
+          const { documents: loadedDocuments } = await api.getDocuments()
+          if (!active) return
+
+          applyDocuments(loadedDocuments)
+          setDocumentsError('')
+
+          if (loadedDocuments.some((document) => document.status === 'queued' || document.status === 'processing')) {
+            scheduleNextPoll()
+          } else {
+            clearDocumentsPolling()
+          }
+        } catch {
+          if (!active) return
+          scheduleNextPoll()
+        }
+      }, 2500)
+    }
+
+    scheduleNextPoll()
+
+    return () => {
+      active = false
+      clearDocumentsPolling()
+    }
+  }, [authStatus, clearDocumentsPolling, hasPendingDocuments, user, applyDocuments])
 
   const selectedDocument = useMemo(
     () => documents.find((document) => document.id === selectedDocumentId) ?? documents[0],
@@ -461,6 +522,7 @@ function App() {
 
   async function handleLogout() {
     await api.logout()
+    clearDocumentsPolling()
     setUser(null)
     setDocuments([])
     setDocumentsError('')

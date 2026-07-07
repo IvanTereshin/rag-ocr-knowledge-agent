@@ -12,15 +12,16 @@
 
 ## Этап 1: Production Foundation
 
-Статус: начат.
+Статус: частично готов.
 
 Что уже есть:
 
-- `docker-compose.production.yml` с `app`, `postgres`, `qdrant`, `tei`.
+- `docker-compose.production.yml` с `app`, `worker`, `postgres`, `redis`, `minio`, `qdrant`, `tei`.
 - PostgreSQL persistence через `DATABASE_URL`.
 - JSON store fallback для local dev.
 - Базовый rate limit.
 - Local TEI reranker на `BAAI/bge-reranker-base`.
+- Fail-fast production checks для `APP_SECRET`.
 
 Что ещё нужно закрыть:
 
@@ -86,18 +87,21 @@ Definition of Done:
 
 Текущий slice:
 
-- уже поднят каркас Redis + MinIO;
-- уже выделены queue/storage интерфейсы;
-- upload еще не переведен полностью на worker-flow;
-- это подготовительный этап перед полноценным переключением обработки.
+- API умеет работать в `PROCESSING_MODE=queued`;
+- upload сохраняет source через storage adapter и ставит job в Redis;
+- отдельный `worker` service запускает `processDocument`;
+- frontend polling обновляет статусы `queued` / `processing`;
+- inline-flow сохранён как local/dev fallback через `PROCESSING_MODE=inline`.
 
 Порядок внедрения:
 
-1. API сохраняет файл в object storage и создаёт document record.
-2. API ставит job в queue.
-3. Worker скачивает файл, делает extraction/OCR/chunking/indexing.
-4. Worker обновляет статус документа.
-5. UI polling показывает реальные статусы.
+1. API сохраняет файл в object storage и создаёт document record. Готово.
+2. API ставит job в queue. Готово.
+3. Worker скачивает файл, делает extraction/OCR/chunking. Готово.
+4. Worker обновляет статус документа. Готово.
+5. UI polling показывает реальные статусы. Готово.
+6. Worker индексирует chunks в Qdrant через общий shared module. Готово.
+7. Derived text/chunks artifacts нужно вынести из shared volume в object storage или нормальные таблицы.
 
 Definition of Done:
 
@@ -164,11 +168,12 @@ Definition of Done:
 
 ## Приоритет Следующих Задач
 
-1. Нормализовать PostgreSQL schema.
-2. Интегрировать Qdrant embeddings module.
-3. Довести worker/storage slice до полного переключения upload на очередь.
-4. Закрыть первый security hardening slice: CSRF, Origin/CORS, upload validation, per-route limits, APP_SECRET fail-fast, cookie env hardening.
-5. Добавить LLM AnswerGenerator.
+1. Добавить LLM AnswerGenerator с citations.
+2. Нормализовать PostgreSQL schema и добавить миграции.
+3. Вынести derived text/chunks artifacts из shared volume в object storage или нормальные таблицы.
+4. Добавить structured health checks для Redis, MinIO, Qdrant, TEI и AI providers.
+5. Добавить CI build/lint workflow.
+6. Закрыть оставшиеся security hardening задачи и backup/restore runbook.
 
 ## Правило Для Агентов-Исполнителей
 

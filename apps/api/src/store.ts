@@ -71,9 +71,15 @@ export type DocumentRecord = {
   sizeBytes: number
   status: 'uploaded' | 'queued' | 'processing' | 'ready' | 'failed'
   storagePath: string
+  storageKey?: string
   textPath?: string
   textPreview?: string
   chunkCount?: number
+  jobId?: string
+  queuedAt?: string
+  processingStartedAt?: string
+  processedAt?: string
+  pipelineVersion?: string
   pipeline?: PipelineStepRecord[]
   error?: string
   createdAt: string
@@ -134,10 +140,6 @@ export class JsonStore implements AppStore {
   constructor(private readonly filePath: string) {}
 
   async read(): Promise<StoreData> {
-    if (this.data) {
-      return this.data
-    }
-
     if (!existsSync(this.filePath)) {
       mkdirSync(dirname(this.filePath), { recursive: true })
       this.data = structuredClone(emptyStore)

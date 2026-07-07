@@ -7,6 +7,7 @@
     "build": "npm run build:web && npm run build:api",
     "build:web": "npm --prefix apps/web run build",
     "build:api": "npm --prefix apps/api run build",
+    "worker": "npm --prefix apps/api run worker",
     "lint": "npm --prefix apps/web run lint",
     "preview": "npm --prefix apps/web run preview"
   }
