@@ -2,6 +2,23 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes, scryptSync, 
 import type { EncryptedSecret } from './store.js'
 
 const keySalt = 'rag-ocr-agent-settings-v1'
+const localDevelopmentSecret = 'local-development-secret-change-me'
+
+export function assertAppSecretIsSafe(): void {
+  const secret = process.env.APP_SECRET?.trim()
+
+  if (process.env.NODE_ENV !== 'production') {
+    return
+  }
+
+  if (!secret) {
+    throw new Error('APP_SECRET is required in production')
+  }
+
+  if (secret === localDevelopmentSecret || secret.startsWith('replace-with-')) {
+    throw new Error('APP_SECRET must be changed before production startup')
+  }
+}
 
 export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase()
@@ -27,7 +44,7 @@ export function hashSessionToken(token: string): string {
 }
 
 export function getEncryptionKey(): Buffer {
-  const secret = process.env.APP_SECRET ?? 'local-development-secret-change-me'
+  const secret = process.env.APP_SECRET?.trim() || localDevelopmentSecret
   return scryptSync(secret, keySalt, 32)
 }
 

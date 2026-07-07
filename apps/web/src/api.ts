@@ -84,11 +84,77 @@ type AuthPayload = {
   password: string
 }
 
+type CsrfResponse = {
+  csrfToken: string
+}
+
+const CSRF_METHODS = new Set(['POST', 'PUT', 'DELETE', 'PATCH'])
+const CSRF_EXEMPT_PATHS = new Set(['/api/auth/register', '/api/auth/login'])
+
+let cachedCsrfToken: string | null = null
+let csrfTokenPromise: Promise<string> | null = null
+
+function isStateChangingMethod(method?: string): boolean {
+  return typeof method === 'string' && CSRF_METHODS.has(method.toUpperCase())
+}
+
+async function fetchCsrfToken(): Promise<string> {
+  const response = await fetch('/api/auth/csrf', {
+    credentials: 'include',
+  })
+
+  const payload = (await response.json().catch(() => ({}))) as Partial<CsrfResponse> & {
+    error?: unknown
+  }
+
+  if (!response.ok) {
+    const message = typeof payload.error === 'string' ? payload.error : 'CSRF endpoint is unavailable'
+    throw new Error(`Не удалось получить CSRF-токен: ${message}`)
+  }
+
+  if (typeof payload.csrfToken !== 'string' || payload.csrfToken.length === 0) {
+    throw new Error('Не удалось получить CSRF-токен: сервер вернул пустой или некорректный ответ')
+  }
+
+  return payload.csrfToken
+}
+
+async function getCsrfToken(): Promise<string> {
+  if (cachedCsrfToken) {
+    return cachedCsrfToken
+  }
+
+  if (!csrfTokenPromise) {
+    csrfTokenPromise = fetchCsrfToken()
+      .then((token) => {
+        cachedCsrfToken = token
+        return token
+      })
+      .finally(() => {
+        csrfTokenPromise = null
+      })
+  }
+
+  return csrfTokenPromise
+}
+
+async function withCsrfHeader(headers: Headers, method: string | undefined, url: string): Promise<Headers> {
+  if (!isStateChangingMethod(method) || CSRF_EXEMPT_PATHS.has(url)) {
+    return headers
+  }
+
+  const csrfToken = await getCsrfToken()
+  headers.set('x-csrf-token', csrfToken)
+  return headers
+}
+
 async function requestJson<T>(url: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers)
   if (options.body && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
   }
+
+  await withCsrfHeader(headers, options.method, url)
 
   const response = await fetch(url, {
     credentials: 'include',
@@ -111,10 +177,13 @@ async function uploadFiles(files: File[] | FileList): Promise<{ documents: UserD
     formData.append('files', file)
   })
 
+  const headers = await withCsrfHeader(new Headers(), 'POST', '/api/documents')
+
   const response = await fetch('/api/documents', {
     method: 'POST',
     credentials: 'include',
     body: formData,
+    headers,
   })
 
   const payload = await response.json().catch(() => ({}))

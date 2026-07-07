@@ -14,6 +14,7 @@ export type UserRecord = {
 export type SessionRecord = {
   tokenHash: string
   userId: string
+  csrfTokenHash?: string
   expiresAt: string
   createdAt: string
 }

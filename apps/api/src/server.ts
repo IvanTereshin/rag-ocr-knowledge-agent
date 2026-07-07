@@ -3,13 +3,14 @@ import cookie from '@fastify/cookie'
 import multipart from '@fastify/multipart'
 import rateLimit from '@fastify/rate-limit'
 import fastifyStatic from '@fastify/static'
-import type { FastifyRequest } from 'fastify'
+import type { FastifyReply, FastifyRequest } from 'fastify'
 import { fetch as undiciFetch, ProxyAgent } from 'undici'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { basename, dirname, extname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
 import {
+  assertAppSecretIsSafe,
   createSessionToken,
   decryptSecret,
   encryptSecret,
@@ -22,6 +23,7 @@ import {
 import { answerQuestion, createPipelineSteps, processDocument, readDocumentText, selectAnswerCandidates } from './pipeline.js'
 import type { PipelineResult, RankedChunk } from './pipeline.js'
 import { createEmbeddingProvider, createQdrantClient } from './rag.js'
+import { validateUploadFile } from './upload-validation.js'
 import { createStoreFromEnv } from './store.js'
 import type {
   DocumentChunkRecord,
@@ -30,6 +32,7 @@ import type {
   ServiceProvider,
   ServiceSettingsRecord,
   ServiceValidationRecord,
+  SessionRecord,
   StoreData,
   UserRecord,
 } from './store.js'
@@ -39,12 +42,23 @@ const sessionTtlMs = 1000 * 60 * 60 * 24 * 7
 const dataDir = process.env.DATA_DIR ?? join(process.cwd(), 'data')
 const uploadRoot = join(dataDir, 'uploads')
 const textRoot = join(dataDir, 'extracted-text')
-const maxUploadBytes = 25 * 1024 * 1024
 const validationTimeoutMs = 8000
 const maxRerankCandidates = 12
 const rerankResultLimit = 3
 const rateLimitMax = Number(process.env.RATE_LIMIT_MAX ?? 180)
 const rateLimitWindow = process.env.RATE_LIMIT_WINDOW ?? '1 minute'
+const authRateLimitMax = parsePositiveInteger(process.env.AUTH_RATE_LIMIT_MAX, 20)
+const authRateLimitWindow = process.env.AUTH_RATE_LIMIT_WINDOW ?? '1 minute'
+const uploadRateLimitMax = parsePositiveInteger(process.env.UPLOAD_RATE_LIMIT_MAX, 20)
+const uploadRateLimitWindow = process.env.UPLOAD_RATE_LIMIT_WINDOW ?? '1 minute'
+const askRateLimitMax = parsePositiveInteger(process.env.ASK_RATE_LIMIT_MAX, 60)
+const askRateLimitWindow = process.env.ASK_RATE_LIMIT_WINDOW ?? '1 minute'
+const maxUploadBytes = parsePositiveInteger(process.env.UPLOAD_MAX_BYTES, 25 * 1024 * 1024)
+const maxUploadFiles = parsePositiveInteger(process.env.UPLOAD_MAX_FILES, 8)
+const csrfHeaderName = (process.env.CSRF_HEADER_NAME?.trim() || 'x-csrf-token').toLowerCase()
+const allowedCorsOrigins = parseCsvEnv(process.env.CORS_ORIGINS)
+const trustProxy = parseBooleanEnv(process.env.TRUST_PROXY, false)
+const appLogLevel = process.env.APP_LOG_LEVEL?.trim() || 'info'
 const embeddingModel = process.env.EMBEDDING_MODEL?.trim() || 'text-embedding-3-small'
 const qdrantCollectionName = process.env.QDRANT_COLLECTION?.trim() || 'rag_ocr_chunks'
 const vectorSearchLimit = parsePositiveInteger(process.env.VECTOR_SEARCH_LIMIT, maxRerankCandidates)
@@ -225,6 +239,26 @@ function serviceValidation(
 function parsePositiveInteger(value: string | undefined, fallback: number) {
   const parsed = Number(value)
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback
+}
+
+function parseBooleanEnv(value: string | undefined, fallback: boolean) {
+  if (!value) {
+    return fallback
+  }
+
+  return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase())
+}
+
+function parseCsvEnv(value: string | undefined) {
+  return (value ?? '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+function parseSameSiteEnv(): 'lax' | 'strict' | 'none' {
+  const value = process.env.SESSION_COOKIE_SAMESITE?.trim().toLowerCase()
+  return value === 'strict' || value === 'none' ? value : 'lax'
 }
 
 function trimTrailingSlash(value: string) {
@@ -919,11 +953,6 @@ function safeOriginalName(filename: string) {
   return safeName || 'document'
 }
 
-function getFileType(filename: string) {
-  const extension = extname(filename).replace('.', '').toUpperCase()
-  return extension || 'FILE'
-}
-
 async function pruneExpiredSessions(data: StoreData) {
   const now = Date.now()
   const sessions = data.sessions.filter((session) => Date.parse(session.expiresAt) > now)
@@ -1003,8 +1032,149 @@ function getAskBody(body: unknown): AskBody {
   return body as AskBody
 }
 
+function normalizedRequestPath(request: FastifyRequest) {
+  return request.url.split('?')[0] ?? request.url
+}
+
+function isApiMutation(request: FastifyRequest) {
+  return (
+    normalizedRequestPath(request).startsWith('/api/') &&
+    !['GET', 'HEAD', 'OPTIONS'].includes(request.method.toUpperCase())
+  )
+}
+
+function requiresCsrf(request: FastifyRequest) {
+  if (!isApiMutation(request)) {
+    return false
+  }
+
+  return !['/api/auth/register', '/api/auth/login'].includes(normalizedRequestPath(request))
+}
+
+function headerAsString(value: string | string[] | undefined) {
+  return Array.isArray(value) ? value[0] : value
+}
+
+function normalizeOrigin(value: string) {
+  const parsed = new URL(value)
+  return parsed.origin
+}
+
+function requestHost(request: FastifyRequest) {
+  const forwardedHost = headerAsString(request.headers['x-forwarded-host'])
+  const host = forwardedHost ?? request.headers.host
+  return host?.split(',')[0]?.trim().toLowerCase()
+}
+
+function requestOriginFromHeaders(request: FastifyRequest) {
+  const origin = headerAsString(request.headers.origin)
+  if (origin) {
+    return origin
+  }
+
+  const referer = headerAsString(request.headers.referer)
+  if (!referer) {
+    return undefined
+  }
+
+  try {
+    return new URL(referer).origin
+  } catch {
+    return undefined
+  }
+}
+
+function isTrustedOrigin(origin: string, request: FastifyRequest) {
+  let normalizedOrigin: string
+  try {
+    normalizedOrigin = normalizeOrigin(origin)
+  } catch {
+    return false
+  }
+
+  if (allowedCorsOrigins.some((allowedOrigin) => {
+    try {
+      return normalizeOrigin(allowedOrigin) === normalizedOrigin
+    } catch {
+      return false
+    }
+  })) {
+    return true
+  }
+
+  const originHost = new URL(normalizedOrigin).host.toLowerCase()
+  return originHost === requestHost(request)
+}
+
+function applyCorsHeaders(request: FastifyRequest, reply: FastifyReply) {
+  const origin = headerAsString(request.headers.origin)
+  if (!origin || !isTrustedOrigin(origin, request)) {
+    return
+  }
+
+  reply.header('Access-Control-Allow-Origin', normalizeOrigin(origin))
+  reply.header('Access-Control-Allow-Credentials', 'true')
+  reply.header('Access-Control-Allow-Headers', `content-type, ${csrfHeaderName}`)
+  reply.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS')
+  reply.header('Vary', 'Origin')
+}
+
+function originValidationError(request: FastifyRequest) {
+  if (!isApiMutation(request)) {
+    return undefined
+  }
+
+  const origin = requestOriginFromHeaders(request)
+  if (!origin) {
+    return undefined
+  }
+
+  return isTrustedOrigin(origin, request) ? undefined : 'Request origin is not allowed'
+}
+
+function findSessionFromRequest(data: StoreData, request: FastifyRequest): SessionRecord | undefined {
+  const token = request.cookies[cookieName]
+  if (!token) {
+    return undefined
+  }
+
+  const tokenHash = hashSessionToken(token)
+  return data.sessions.find((session) => session.tokenHash === tokenHash)
+}
+
+function csrfValidationError(data: StoreData, request: FastifyRequest) {
+  if (!requiresCsrf(request)) {
+    return undefined
+  }
+
+  const session = findSessionFromRequest(data, request)
+  if (!session) {
+    return 'Not authenticated'
+  }
+
+  const csrfToken = headerAsString(request.headers[csrfHeaderName])
+  if (!csrfToken) {
+    return 'CSRF token is required'
+  }
+
+  if (!session.csrfTokenHash) {
+    return 'CSRF token was not issued for this session'
+  }
+
+  return hashSessionToken(csrfToken) === session.csrfTokenHash
+    ? undefined
+    : 'CSRF token is invalid'
+}
+
 async function main() {
-  const app = fastify({ logger: true })
+  assertAppSecretIsSafe()
+  const app = fastify({
+    trustProxy,
+    logger: {
+      level: appLogLevel,
+      redact: ['req.headers.authorization', 'req.headers.cookie'],
+    },
+  })
   app.addHook('onClose', async () => {
     await store.close()
   })
@@ -1017,8 +1187,33 @@ async function main() {
   await app.register(multipart, {
     limits: {
       fileSize: maxUploadBytes,
-      files: 8,
+      files: maxUploadFiles,
     },
+  })
+
+  app.addHook('onRequest', async (request, reply) => {
+    applyCorsHeaders(request, reply)
+
+    if (request.method.toUpperCase() === 'OPTIONS' && normalizedRequestPath(request).startsWith('/api/')) {
+      return reply.code(204).send()
+    }
+  })
+
+  app.addHook('preHandler', async (request, reply) => {
+    const originError = originValidationError(request)
+    if (originError) {
+      return reply.code(403).send({ error: originError })
+    }
+
+    if (!requiresCsrf(request)) {
+      return
+    }
+
+    const data = await store.read()
+    const csrfError = csrfValidationError(data, request)
+    if (csrfError) {
+      return reply.code(csrfError === 'Not authenticated' ? 401 : 403).send({ error: csrfError })
+    }
   })
 
   app.get('/api/health', async () => ({
@@ -1052,7 +1247,35 @@ async function main() {
     return { user: publicUser(user) }
   })
 
-  app.post('/api/auth/register', async (request, reply) => {
+  app.get('/api/auth/csrf', async (request, reply) => {
+    const data = await store.read()
+    await pruneExpiredSessions(data)
+
+    const freshData = await store.read()
+    const session = findSessionFromRequest(freshData, request)
+    if (!session) {
+      return reply.code(401).send({ error: 'Not authenticated' })
+    }
+
+    const user = freshData.users.find((item) => item.id === session.userId)
+    if (!user) {
+      return reply.code(401).send({ error: 'Not authenticated' })
+    }
+
+    const csrfToken = createSessionToken()
+    await store.write({
+      ...freshData,
+      sessions: freshData.sessions.map((item) =>
+        item.tokenHash === session.tokenHash
+          ? { ...item, csrfTokenHash: hashSessionToken(csrfToken) }
+          : item,
+      ),
+    })
+
+    return { csrfToken, headerName: csrfHeaderName }
+  })
+
+  app.post('/api/auth/register', { config: { rateLimit: { max: authRateLimitMax, timeWindow: authRateLimitWindow } } }, async (request, reply) => {
     const body = getAuthBody(request.body)
     const email = normalizeEmail(body.email ?? '')
     const name = (body.name ?? '').trim()
@@ -1100,7 +1323,7 @@ async function main() {
       .send({ user: publicUser(user) })
   })
 
-  app.post('/api/auth/login', async (request, reply) => {
+  app.post('/api/auth/login', { config: { rateLimit: { max: authRateLimitMax, timeWindow: authRateLimitWindow } } }, async (request, reply) => {
     const body = getAuthBody(request.body)
     const email = normalizeEmail(body.email ?? '')
     const password = body.password ?? ''
@@ -1127,7 +1350,7 @@ async function main() {
     return reply.setCookie(cookieName, sessionToken, sessionCookieOptions()).send({ user: publicUser(user) })
   })
 
-  app.post('/api/auth/logout', async (request, reply) => {
+  app.post('/api/auth/logout', { config: { rateLimit: { max: authRateLimitMax, timeWindow: authRateLimitWindow } } }, async (request, reply) => {
     const token = request.cookies[cookieName]
     if (token) {
       const data = await store.read()
@@ -1154,7 +1377,7 @@ async function main() {
     }
   })
 
-  app.put('/api/settings/services', async (request, reply) => {
+  app.put('/api/settings/services', { config: { rateLimit: { max: authRateLimitMax, timeWindow: authRateLimitWindow } } }, async (request, reply) => {
     const user = await currentUser(request)
     if (!user) {
       return reply.code(401).send({ error: 'Not authenticated' })
@@ -1227,7 +1450,7 @@ async function main() {
     return { documents: documents.map(publicDocument) }
   })
 
-  app.post('/api/documents', async (request, reply) => {
+  app.post('/api/documents', { config: { rateLimit: { max: uploadRateLimitMax, timeWindow: uploadRateLimitWindow } } }, async (request, reply) => {
     const user = await currentUser(request)
     if (!user) {
       return reply.code(401).send({ error: 'Not authenticated' })
@@ -1238,26 +1461,42 @@ async function main() {
       return reply.code(400).send({ error: 'At least one file is required' })
     }
 
+    if (files.length > maxUploadFiles) {
+      return reply.code(400).send({ error: `Upload accepts at most ${maxUploadFiles} files` })
+    }
+
     const data = await store.read()
     const uploadDir = join(uploadRoot, user.id)
     mkdirSync(uploadDir, { recursive: true })
 
     const now = new Date().toISOString()
-    const uploadedDocuments: DocumentRecord[] = files.map((file, index) => {
+    const uploadedDocuments: DocumentRecord[] = []
+
+    for (const [index, file] of files.entries()) {
       const originalName = safeOriginalName(file.filename)
       const extension = extname(originalName)
       const storedName = `${Date.now()}-${index}-${randomUUID()}${extension}`
       const storagePath = join(uploadDir, storedName)
       const fileBuffer = readFileSync(file.filepath)
+      const validation = validateUploadFile({
+        filename: originalName,
+        mimetype: file.mimetype,
+        sizeBytes: fileBuffer.byteLength,
+        buffer: fileBuffer,
+      }, maxUploadBytes)
+
+      if (!validation.ok) {
+        return reply.code(400).send({ error: `${originalName}: ${validation.error}` })
+      }
 
       writeFileSync(storagePath, fileBuffer)
 
-      return {
+      uploadedDocuments.push({
         id: randomUUID(),
         userId: user.id,
         fileName: storedName,
         originalName,
-        fileType: getFileType(originalName),
+        fileType: validation.fileType.toUpperCase(),
         mimeType: file.mimetype || 'application/octet-stream',
         sizeBytes: fileBuffer.byteLength,
         status: 'processing',
@@ -1266,8 +1505,8 @@ async function main() {
         pipeline: createPipelineSteps(),
         createdAt: now,
         updatedAt: now,
-      }
-    })
+      })
+    }
 
     const processedResults = await Promise.all(
       uploadedDocuments.map(async (document) => {
@@ -1294,7 +1533,7 @@ async function main() {
     return reply.code(201).send({ documents: processedDocuments.map(publicDocument) })
   })
 
-  app.post('/api/documents/:documentId/process', async (request, reply) => {
+  app.post('/api/documents/:documentId/process', { config: { rateLimit: { max: uploadRateLimitMax, timeWindow: uploadRateLimitWindow } } }, async (request, reply) => {
     const user = await currentUser(request)
     if (!user) {
       return reply.code(401).send({ error: 'Not authenticated' })
@@ -1356,7 +1595,7 @@ async function main() {
     return { text: readDocumentText(document), document: publicDocument(document) }
   })
 
-  app.post('/api/ask', async (request, reply) => {
+  app.post('/api/ask', { config: { rateLimit: { max: askRateLimitMax, timeWindow: askRateLimitWindow } } }, async (request, reply) => {
     const user = await currentUser(request)
     if (!user) {
       return reply.code(401).send({ error: 'Not authenticated' })
@@ -1479,10 +1718,15 @@ async function main() {
 }
 
 function sessionCookieOptions() {
+  const sameSite = parseSameSiteEnv()
+  const secure = process.env.SESSION_COOKIE_SECURE
+    ? parseBooleanEnv(process.env.SESSION_COOKIE_SECURE, process.env.NODE_ENV === 'production')
+    : process.env.NODE_ENV === 'production'
+
   return {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'lax' as const,
+    secure: sameSite === 'none' ? true : secure,
+    sameSite,
     path: '/',
     maxAge: Math.floor(sessionTtlMs / 1000),
   }

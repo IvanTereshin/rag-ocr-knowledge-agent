@@ -2,6 +2,8 @@
 
 Этот чеклист связывает текущие production-риски с конкретными файлами. Его задача - дать понятный порядок работ перед реальным запуском для клиентов.
 
+Важно: это первый security hardening slice, а не весь production. Здесь собраны только самые критичные вещи, которые нужно закрыть в P0 перед следующим шагом.
+
 ## P0
 
 ### 1. Добавить CSRF-защиту для cookie auth
@@ -19,7 +21,22 @@
 - Согласовать `SameSite` cookie с моделью деплоя.
 - Если frontend и API будут на разных origin, не полагаться только на cookie.
 
-### 2. Проверять загружаемые файлы на сервере
+### 2. Явно задать Origin/CORS policy
+
+Риск: при раздельном frontend и API можно случайно открыть лишние origin и ослабить защиту state-changing routes.
+
+Где внедрять:
+
+- `apps/api/src/server.ts`
+- `apps/web/src/api.ts`
+
+Что сделать:
+
+- Завести allowlist доверенных frontend origin.
+- Отклонять неожиданные `Origin` и `Referer` на state-changing routes.
+- По возможности оставить same-origin deployment дефолтом.
+
+### 3. Проверять загружаемые файлы на сервере
 
 Риск: UI фильтрует типы файлов, но API должен сам отбрасывать опасные или неподдерживаемые файлы.
 
@@ -35,7 +52,21 @@
 - Проверять реальный тип файла, а не только имя или заголовок от браузера.
 - Вынести лимиты размера и количества файлов в env.
 
-### 3. Убрать слабый fallback для `APP_SECRET` в production
+### 4. Разделить rate limits по маршрутам
+
+Риск: одного общего лимита мало для login, upload, settings и ask endpoints.
+
+Где внедрять:
+
+- `apps/api/src/server.ts`
+
+Что сделать:
+
+- Поставить более строгие лимиты на auth и upload.
+- Отдельно ограничить дорогие `ask` и rerank вызовы.
+- Читать значения из env.
+
+### 5. Убрать слабый fallback для `APP_SECRET` в production
 
 Риск: `APP_SECRET` используется для сессий и шифрования API-ключей. В production нельзя запускаться с дефолтным секретом.
 
@@ -51,24 +82,25 @@
 - Завершать запуск с ошибкой, если `APP_SECRET` отсутствует вне local dev.
 - Описать правила rotation и backup, потому что при смене секрета старые ключи не расшифруются.
 
-## P1
+### 6. Жестко настроить cookie через env
 
-### 4. Добавить явную CORS и Origin policy
-
-Риск: при разделении frontend и API на разные домены можно случайно расширить доверенную поверхность.
+Риск: cookie и session flags должны быть безопасными по умолчанию и не зависеть от случайной локальной конфигурации.
 
 Где внедрять:
 
 - `apps/api/src/server.ts`
-- `apps/web/src/api.ts`
+- `.env.example`
+- `.env.production.example`
 
 Что сделать:
 
-- Завести allowlist доверенных frontend origin.
-- Отклонять неожиданные `Origin` и `Referer` на state-changing routes.
-- По возможности оставить same-origin deployment дефолтом.
+- Описать через env `SameSite`, `Secure`, `HttpOnly`, `Path` и `Domain`, если они нужны для деплоя.
+- Держать безопасные значения по умолчанию.
+- Пояснить влияние reverse proxy на `secure` cookies.
 
-### 5. Защитить исходящие URL от SSRF
+## P1
+
+### 7. Защитить исходящие URL от SSRF
 
 Риск: пользовательские `baseUrl` и proxy URL могут указывать на внутренние сервисы.
 
@@ -83,21 +115,7 @@
 - Блокировать private и loopback адреса, кроме явно включенного local режима.
 - Оставить поддержку Local TEI и Qdrant, но сделать это осознанным исключением.
 
-### 6. Разделить rate limits по маршрутам
-
-Риск: одного общего лимита мало для login, upload, settings и ask endpoints.
-
-Где внедрять:
-
-- `apps/api/src/server.ts`
-
-Что сделать:
-
-- Поставить более строгие лимиты на auth и upload.
-- Отдельно ограничить дорогие `ask` и rerank вызовы.
-- Читать значения из env.
-
-### 7. Почистить production logs
+### 8. Почистить production logs
 
 Риск: обычные request logs могут случайно раскрыть cookie, ключи, имена файлов или служебные детали.
 
@@ -111,7 +129,7 @@
 - Не логировать secrets, cookies, содержимое файлов и provider keys.
 - Добавить request id, чтобы искать ошибки без лишних персональных данных.
 
-### 8. Добавить scan step перед обработкой файлов
+### 9. Добавить scan step перед обработкой файлов
 
 Риск: загруженные документы сейчас сразу пишутся и парсятся.
 
@@ -129,7 +147,7 @@
 
 ## P2
 
-### 9. Добавить security headers
+### 10. Добавить security headers
 
 Риск: приложение пока не задает явную browser security policy.
 
@@ -142,7 +160,7 @@
 - Добавить `Content-Security-Policy`, `frame-ancestors`, `Referrer-Policy`, `Permissions-Policy`.
 - Проверить совместимость с Vite frontend и static assets.
 
-### 10. Сделать session и cookie поведение настраиваемым
+### 11. Сделать session и cookie поведение настраиваемым
 
 Риск: hardcoded cookie/session правила могут не подойти под каждый production deployment.
 
@@ -158,7 +176,7 @@
 - Описать влияние reverse proxy на `secure` cookies.
 - Чистить expired sessions по расписанию, а не только во время запросов.
 
-### 11. Описать storage и backup правила
+### 12. Описать storage и backup правила
 
 Риск: uploads, extracted text и state могут расти незаметно и потеряться без backup.
 

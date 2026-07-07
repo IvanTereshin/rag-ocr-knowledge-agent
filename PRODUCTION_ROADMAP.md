@@ -119,24 +119,24 @@ Definition of Done:
 
 ## Этап 5: Security Hardening
 
-Минимальный production набор:
+Это первый security hardening slice, а не весь production. Здесь только P0-минимум, который нужно закрыть раньше остальных production-задач.
+
+Минимальный P0 security набор:
 
 - CSRF protection для cookie auth.
-- Per-route rate limits для login, upload, ask.
-- File type allowlist по MIME и extension.
-- File size limits per plan/user.
-- Audit log действий.
-- Secure headers.
-- CORS policy.
-- Secret rotation plan.
-- Upload antivirus/file scanning hook.
+- Явная Origin/CORS policy для frontend и state-changing routes.
+- Upload validation на сервере: MIME, extension, real type, size limits.
+- Per-route rate limits для login, upload, ask и rerank.
+- Fail-fast для `APP_SECRET`, если секрет не задан в production.
+- Safe-by-default cookie env hardening: `SameSite`, `Secure`, `HttpOnly`, `Path`, `Domain`.
 
 Definition of Done:
 
 - Login нельзя брутфорсить простым циклом.
 - Upload принимает только разрешённые типы.
-- API не логирует secrets.
-- Все state-changing routes защищены от CSRF.
+- API не стартует в production без `APP_SECRET`.
+- Все state-changing routes защищены от CSRF и unexpected origin.
+- Cookie flags задаются безопасно через env и не зависят от случайных дефолтов.
 
 ## Этап 6: Observability И Operations
 
@@ -160,7 +160,7 @@ Definition of Done:
 1. Нормализовать PostgreSQL schema.
 2. Интегрировать Qdrant embeddings module.
 3. Вынести processing в worker.
-4. Добавить CSRF + upload validation.
+4. Закрыть первый security hardening slice: CSRF, Origin/CORS, upload validation, per-route limits, APP_SECRET fail-fast, cookie env hardening.
 5. Добавить LLM AnswerGenerator.
 
 ## Правило Для Агентов-Исполнителей
