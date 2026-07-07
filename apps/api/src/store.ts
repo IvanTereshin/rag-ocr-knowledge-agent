@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import postgres from 'postgres'
 
 export type UserRecord = {
   id: string
@@ -107,12 +108,31 @@ const emptyStore: StoreData = {
   chunksByDocumentId: {},
 }
 
-export class JsonStore {
+export interface AppStore {
+  read(): Promise<StoreData>
+  write(nextData: StoreData): Promise<void>
+  close(): Promise<void>
+}
+
+function normalizeStoreData(parsed: Partial<StoreData>): StoreData {
+  return {
+    ...emptyStore,
+    ...parsed,
+    users: parsed.users ?? [],
+    sessions: parsed.sessions ?? [],
+    settingsByUserId: parsed.settingsByUserId ?? {},
+    proxyByUserId: parsed.proxyByUserId ?? {},
+    documentsByUserId: parsed.documentsByUserId ?? {},
+    chunksByDocumentId: parsed.chunksByDocumentId ?? {},
+  }
+}
+
+export class JsonStore implements AppStore {
   private data: StoreData | null = null
 
   constructor(private readonly filePath: string) {}
 
-  read(): StoreData {
+  async read(): Promise<StoreData> {
     if (this.data) {
       return this.data
     }
@@ -120,32 +140,92 @@ export class JsonStore {
     if (!existsSync(this.filePath)) {
       mkdirSync(dirname(this.filePath), { recursive: true })
       this.data = structuredClone(emptyStore)
-      this.write(this.data)
+      await this.write(this.data)
       return this.data
     }
 
     const parsed = JSON.parse(readFileSync(this.filePath, 'utf8')) as StoreData
-    this.data = {
-      ...emptyStore,
-      ...parsed,
-      settingsByUserId: parsed.settingsByUserId ?? {},
-      proxyByUserId: parsed.proxyByUserId ?? {},
-      documentsByUserId: parsed.documentsByUserId ?? {},
-      chunksByDocumentId: parsed.chunksByDocumentId ?? {},
-    }
+    this.data = normalizeStoreData(parsed)
     return this.data
   }
 
-  write(nextData: StoreData): void {
+  async write(nextData: StoreData): Promise<void> {
     mkdirSync(dirname(this.filePath), { recursive: true })
     const tempPath = `${this.filePath}.tmp`
     writeFileSync(tempPath, JSON.stringify(nextData, null, 2))
     renameSync(tempPath, this.filePath)
     this.data = nextData
   }
+
+  async close(): Promise<void> {}
 }
 
-export function createStoreFromEnv(): JsonStore {
+export class PostgresStore implements AppStore {
+  private readonly sql: postgres.Sql
+  private initialized = false
+
+  constructor(databaseUrl: string) {
+    const maxConnections = Number(process.env.POSTGRES_MAX_CONNECTIONS ?? 5)
+    this.sql = postgres(databaseUrl, {
+      max: Number.isFinite(maxConnections) && maxConnections > 0 ? maxConnections : 5,
+      idle_timeout: 20,
+      connect_timeout: 10,
+    })
+  }
+
+  async read(): Promise<StoreData> {
+    await this.ensureReady()
+    const rows = await this.sql<{ data: StoreData }[]>`
+      SELECT data
+      FROM rag_ocr_app_state
+      WHERE id = 1
+    `
+
+    return normalizeStoreData(rows[0]?.data ?? emptyStore)
+  }
+
+  async write(nextData: StoreData): Promise<void> {
+    await this.ensureReady()
+    await this.sql`
+      INSERT INTO rag_ocr_app_state (id, data, updated_at)
+      VALUES (1, ${this.sql.json(nextData)}, now())
+      ON CONFLICT (id)
+      DO UPDATE SET data = EXCLUDED.data, updated_at = now()
+    `
+  }
+
+  async close(): Promise<void> {
+    await this.sql.end({ timeout: 5 })
+  }
+
+  private async ensureReady(): Promise<void> {
+    if (this.initialized) {
+      return
+    }
+
+    await this.sql`
+      CREATE TABLE IF NOT EXISTS rag_ocr_app_state (
+        id integer PRIMARY KEY CHECK (id = 1),
+        data jsonb NOT NULL,
+        updated_at timestamptz NOT NULL DEFAULT now()
+      )
+    `
+
+    await this.sql`
+      INSERT INTO rag_ocr_app_state (id, data)
+      VALUES (1, ${this.sql.json(emptyStore)})
+      ON CONFLICT (id) DO NOTHING
+    `
+
+    this.initialized = true
+  }
+}
+
+export function createStoreFromEnv(): AppStore {
+  if (process.env.DATABASE_URL) {
+    return new PostgresStore(process.env.DATABASE_URL)
+  }
+
   const dataDir = process.env.DATA_DIR ?? join(process.cwd(), 'data')
   return new JsonStore(join(dataDir, 'store.json'))
 }

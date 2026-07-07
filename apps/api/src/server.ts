@@ -1,6 +1,7 @@
 import fastify from 'fastify'
 import cookie from '@fastify/cookie'
 import multipart from '@fastify/multipart'
+import rateLimit from '@fastify/rate-limit'
 import fastifyStatic from '@fastify/static'
 import type { FastifyRequest } from 'fastify'
 import { fetch as undiciFetch, ProxyAgent } from 'undici'
@@ -41,6 +42,8 @@ const maxUploadBytes = 25 * 1024 * 1024
 const validationTimeoutMs = 8000
 const maxRerankCandidates = 12
 const rerankResultLimit = 3
+const rateLimitMax = Number(process.env.RATE_LIMIT_MAX ?? 180)
+const rateLimitWindow = process.env.RATE_LIMIT_WINDOW ?? '1 minute'
 const store = createStoreFromEnv()
 const proxyAgents = new Map<string, ProxyAgent>()
 const rerankerProviders = ['cohere', 'voyage', 'jina', 'tei'] as const
@@ -751,11 +754,11 @@ function getFileType(filename: string) {
   return extension || 'FILE'
 }
 
-function pruneExpiredSessions(data: StoreData) {
+async function pruneExpiredSessions(data: StoreData) {
   const now = Date.now()
   const sessions = data.sessions.filter((session) => Date.parse(session.expiresAt) > now)
   if (sessions.length !== data.sessions.length) {
-    store.write({ ...data, sessions })
+    await store.write({ ...data, sessions })
   }
 }
 
@@ -832,8 +835,15 @@ function getAskBody(body: unknown): AskBody {
 
 async function main() {
   const app = fastify({ logger: true })
+  app.addHook('onClose', async () => {
+    await store.close()
+  })
 
   await app.register(cookie)
+  await app.register(rateLimit, {
+    max: Number.isFinite(rateLimitMax) && rateLimitMax > 0 ? rateLimitMax : 180,
+    timeWindow: rateLimitWindow,
+  })
   await app.register(multipart, {
     limits: {
       fileSize: maxUploadBytes,
@@ -852,8 +862,8 @@ async function main() {
       return null
     }
 
-    const data = store.read()
-    pruneExpiredSessions(data)
+    const data = await store.read()
+    await pruneExpiredSessions(data)
     const tokenHash = hashSessionToken(token)
     const session = data.sessions.find((item) => item.tokenHash === tokenHash)
     if (!session) {
@@ -882,7 +892,7 @@ async function main() {
       return reply.code(400).send({ error: 'Name, valid email, and password with 8+ chars are required' })
     }
 
-    const data = store.read()
+    const data = await store.read()
     if (data.users.some((user) => user.email === email)) {
       return reply.code(409).send({ error: 'User already exists' })
     }
@@ -904,7 +914,7 @@ async function main() {
       expiresAt: new Date(Date.now() + sessionTtlMs).toISOString(),
     }
 
-    store.write({
+    await store.write({
       ...data,
       users: [...data.users, user],
       sessions: [...data.sessions, session],
@@ -924,7 +934,7 @@ async function main() {
     const body = getAuthBody(request.body)
     const email = normalizeEmail(body.email ?? '')
     const password = body.password ?? ''
-    const data = store.read()
+    const data = await store.read()
     const user = data.users.find((item) => item.email === email)
 
     if (!user || !verifyPassword(password, user.passwordSalt, user.passwordHash)) {
@@ -939,7 +949,7 @@ async function main() {
       expiresAt: new Date(Date.now() + sessionTtlMs).toISOString(),
     }
 
-    store.write({
+    await store.write({
       ...data,
       sessions: [...data.sessions, session],
     })
@@ -950,9 +960,9 @@ async function main() {
   app.post('/api/auth/logout', async (request, reply) => {
     const token = request.cookies[cookieName]
     if (token) {
-      const data = store.read()
+      const data = await store.read()
       const tokenHash = hashSessionToken(token)
-      store.write({
+      await store.write({
         ...data,
         sessions: data.sessions.filter((session) => session.tokenHash !== tokenHash),
       })
@@ -967,7 +977,7 @@ async function main() {
       return reply.code(401).send({ error: 'Not authenticated' })
     }
 
-    const data = store.read()
+    const data = await store.read()
     return {
       services: getServices(data, user.id).map(publicService),
       proxy: publicProxySettings(getProxySettings(data, user.id)),
@@ -982,7 +992,7 @@ async function main() {
 
     const body = getSettingsBody(request.body)
     const incoming = body.services ?? []
-    const data = store.read()
+    const data = await store.read()
     const current = getServices(data, user.id)
     const currentByProvider = new Map(current.map((service) => [service.provider, service]))
     const currentProxy = getProxySettings(data, user.id)
@@ -1017,7 +1027,7 @@ async function main() {
     }))
     const validatedServices = await validateServices(nextServices, nextProxy)
 
-    store.write({
+    await store.write({
       ...data,
       settingsByUserId: {
         ...data.settingsByUserId,
@@ -1041,7 +1051,7 @@ async function main() {
       return reply.code(401).send({ error: 'Not authenticated' })
     }
 
-    const data = store.read()
+    const data = await store.read()
     const documents = data.documentsByUserId[user.id] ?? []
 
     return { documents: documents.map(publicDocument) }
@@ -1058,7 +1068,7 @@ async function main() {
       return reply.code(400).send({ error: 'At least one file is required' })
     }
 
-    const data = store.read()
+    const data = await store.read()
     const uploadDir = join(uploadRoot, user.id)
     mkdirSync(uploadDir, { recursive: true })
 
@@ -1099,7 +1109,7 @@ async function main() {
     })
 
     const currentDocuments = data.documentsByUserId[user.id] ?? []
-    store.write({
+    await store.write({
       ...data,
       documentsByUserId: {
         ...data.documentsByUserId,
@@ -1118,7 +1128,7 @@ async function main() {
     }
 
     const { documentId } = request.params as { documentId?: string }
-    const data = store.read()
+    const data = await store.read()
     const documents = data.documentsByUserId[user.id] ?? []
     const document = documents.find((item) => item.id === documentId)
     if (!document) {
@@ -1134,7 +1144,7 @@ async function main() {
     }
     const result = await processDocument(processingDocument, textRoot)
 
-    store.write({
+    await store.write({
       ...data,
       documentsByUserId: {
         ...data.documentsByUserId,
@@ -1156,7 +1166,7 @@ async function main() {
     }
 
     const { documentId } = request.params as { documentId?: string }
-    const data = store.read()
+    const data = await store.read()
     const document = (data.documentsByUserId[user.id] ?? []).find((item) => item.id === documentId)
     if (!document) {
       return reply.code(404).send({ error: 'Document not found' })
@@ -1183,7 +1193,7 @@ async function main() {
       return reply.code(400).send({ error: 'Question is required' })
     }
 
-    const data = store.read()
+    const data = await store.read()
     const chunks = Object.values(data.chunksByDocumentId)
       .flat()
       .filter((chunk) => chunk.userId === user.id)

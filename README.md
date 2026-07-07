@@ -97,3 +97,22 @@ RAG_PROFILE=local-self-host
 - `ARCHITECTURE.md` - архитектура двух режимов и переключения.
 - `ASSET_PROMPTS.md` - промпты для генерации картинок и мокапов.
 - `.gitignore` - базовый ignore для будущей разработки.
+
+## Production запуск
+
+Для production-окружения используйте compose-файл с отдельными сервисами:
+
+```bash
+cp .env.production.example .env.production
+# заполните APP_SECRET и POSTGRES_PASSWORD
+docker compose --env-file .env.production -f docker-compose.production.yml up -d --build
+```
+
+Состав production stack:
+
+- `app` - Fastify API + собранный React frontend;
+- `postgres` - хранение пользователей, сессий, документов и настроек;
+- `qdrant` - vector store для следующего этапа RAG pipeline;
+- `tei` - локальный reranker `BAAI/bge-reranker-base`.
+
+Если `DATABASE_URL` не задан, API использует локальный JSON store в `DATA_DIR`. Это удобно для разработки, но для production нужен PostgreSQL и стабильный `APP_SECRET`. Если поменять `APP_SECRET`, ранее сохранённые API-ключи нельзя будет расшифровать.
