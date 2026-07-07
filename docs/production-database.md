@@ -1,0 +1,62 @@
+# Production database
+
+Production API использует PostgreSQL, если задан `DATABASE_URL`. Local dev без `DATABASE_URL` продолжает работать через `DATA_DIR/store.json`.
+
+## Tables
+
+`PostgresStore` хранит прежний `StoreData` контракт, но раскладывает его по таблицам:
+
+- `rag_ocr_users` - пользователи и password hash/salt.
+- `rag_ocr_sessions` - HTTP-only cookie sessions и CSRF token hash.
+- `rag_ocr_service_settings` - настройки OpenAI, Mistral, rerankers, Qdrant.
+- `rag_ocr_proxy_settings` - общий proxy URL в зашифрованном виде.
+- `rag_ocr_documents` - metadata документов, статусы pipeline, source/text paths.
+- `rag_ocr_document_chunks` - chunks для retrieval fallback и citations.
+- `rag_ocr_schema_migrations` - применённые миграции.
+
+Секреты остаются зашифрованными через `APP_SECRET`; база не должна хранить raw API keys.
+
+## Legacy migration
+
+Старые инсталляции могли хранить всё состояние в одной строке:
+
+```text
+rag_ocr_app_state(id = 1, data jsonb)
+```
+
+При первом запуске новая версия:
+
+1. создаёт нормализованные таблицы;
+2. если `rag_ocr_app_state` существует и новые таблицы пустые, переносит данные;
+3. записывает migration marker `normalized-store-v1`;
+4. оставляет legacy table как read-only источник истории, не использует её для новых writes.
+
+## Store contract
+
+Для остального backend код не изменился:
+
+```ts
+read(): Promise<StoreData>
+write(nextData: StoreData): Promise<void>
+```
+
+`write()` по-прежнему означает полную замену состояния. В PostgreSQL это делается транзакционно: сначала очищаются дочерние таблицы, затем заново вставляется весь снимок.
+
+## Smoke checks
+
+Минимум после изменения схемы:
+
+```bash
+npm --prefix apps/api run build
+npm run build
+```
+
+Runtime check с `DATABASE_URL`:
+
+1. register;
+2. `/api/auth/csrf`;
+3. upload `.txt`;
+4. `/api/ask`;
+5. проверить counts в `rag_ocr_users`, `rag_ocr_documents`, `rag_ocr_document_chunks`.
+
+Legacy check: создать `rag_ocr_app_state`, запустить API/Store, убедиться, что user/document появились в нормализованных таблицах и повторный старт не создаёт дубликаты.

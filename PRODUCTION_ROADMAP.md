@@ -17,18 +17,18 @@
 Что уже есть:
 
 - `docker-compose.production.yml` с `app`, `worker`, `postgres`, `redis`, `minio`, `qdrant`, `tei`.
-- PostgreSQL persistence через `DATABASE_URL`.
+- PostgreSQL persistence через `DATABASE_URL` с нормализованными таблицами.
+- Legacy migration из `rag_ocr_app_state` jsonb row в нормализованную схему.
 - JSON store fallback для local dev.
 - Базовый rate limit.
 - Local TEI reranker на `BAAI/bge-reranker-base`.
 - Fail-fast production checks для `APP_SECRET`.
+- CI build/lint workflow в GitHub Actions.
 
 Что ещё нужно закрыть:
 
-- Перейти от одного `jsonb` state-row к нормальным таблицам.
-- Добавить миграции.
-- Добавить structured health checks для внешних сервисов.
-- Добавить CI build/lint workflow.
+- Добавить backup/restore runbook для Postgres, Qdrant и object storage.
+- Добавить отдельные миграционные файлы/версии, если схема начнёт развиваться чаще.
 
 Definition of Done:
 
@@ -173,10 +173,9 @@ Definition of Done:
 ## Приоритет Следующих Задач
 
 1. Добавить local LLM AnswerGenerator для Локального режима.
-2. Нормализовать PostgreSQL schema и добавить миграции.
-3. Вынести derived text/chunks artifacts из shared volume в object storage или нормальные таблицы.
-4. Добавить CI build/lint workflow.
-5. Закрыть оставшиеся security hardening задачи и backup/restore runbook.
+2. Вынести derived text/chunks artifacts из shared volume в object storage или нормальные таблицы.
+3. Закрыть оставшиеся security hardening задачи и backup/restore runbook.
+4. Добавить отдельные migration files, если появится следующая версия схемы.
 
 ## Правило Для Агентов-Исполнителей
 
