@@ -73,6 +73,7 @@ export type DocumentRecord = {
   storagePath: string
   storageKey?: string
   textPath?: string
+  textContent?: string
   textPreview?: string
   chunkCount?: number
   jobId?: string
@@ -182,6 +183,7 @@ type DocumentRow = {
   storage_path: string
   storage_key: string | null
   text_path: string | null
+  text_content: string | null
   text_preview: string | null
   chunk_count: number | null
   job_id: string | null
@@ -297,7 +299,7 @@ export class PostgresStore implements AppStore {
       `,
       this.sql<DocumentRow[]>`
         SELECT id, user_id, file_name, original_name, file_type, mime_type, size_bytes, status, storage_path,
-          storage_key, text_path, text_preview, chunk_count, job_id, queued_at, processing_started_at,
+          storage_key, text_path, text_content, text_preview, chunk_count, job_id, queued_at, processing_started_at,
           processed_at, pipeline_version, pipeline, error, created_at, updated_at
         FROM rag_ocr_documents
         ORDER BY user_id ASC, position ASC, created_at DESC
@@ -365,6 +367,7 @@ export class PostgresStore implements AppStore {
             storagePath: document.storage_path,
             storageKey: optionalString(document.storage_key),
             textPath: optionalString(document.text_path),
+            textContent: optionalString(document.text_content),
             textPreview: optionalString(document.text_preview),
             chunkCount: optionalNumber(document.chunk_count),
             jobId: optionalString(document.job_id),
@@ -492,6 +495,7 @@ export class PostgresStore implements AppStore {
         storage_path text NOT NULL,
         storage_key text,
         text_path text,
+        text_content text,
         text_preview text,
         chunk_count integer,
         job_id text,
@@ -504,6 +508,11 @@ export class PostgresStore implements AppStore {
         created_at text NOT NULL,
         updated_at text NOT NULL
       )
+    `
+
+    await this.sql`
+      ALTER TABLE rag_ocr_documents
+      ADD COLUMN IF NOT EXISTS text_content text
     `
 
     await this.sql`
@@ -635,14 +644,14 @@ export class PostgresStore implements AppStore {
           await sql`
             INSERT INTO rag_ocr_documents (
               id, user_id, position, file_name, original_name, file_type, mime_type, size_bytes, status,
-              storage_path, storage_key, text_path, text_preview, chunk_count, job_id, queued_at,
+              storage_path, storage_key, text_path, text_content, text_preview, chunk_count, job_id, queued_at,
               processing_started_at, processed_at, pipeline_version, pipeline, error, created_at, updated_at
             )
             VALUES (
               ${document.id}, ${userId}, ${position}, ${document.fileName}, ${document.originalName},
               ${document.fileType}, ${document.mimeType}, ${document.sizeBytes}, ${document.status},
               ${document.storagePath}, ${document.storageKey ?? null}, ${document.textPath ?? null},
-              ${document.textPreview ?? null}, ${document.chunkCount ?? null}, ${document.jobId ?? null},
+              ${document.textContent ?? null}, ${document.textPreview ?? null}, ${document.chunkCount ?? null}, ${document.jobId ?? null},
               ${document.queuedAt ?? null}, ${document.processingStartedAt ?? null},
               ${document.processedAt ?? null}, ${document.pipelineVersion ?? null},
               ${jsonOrNull(sql, document.pipeline)}, ${document.error ?? null},

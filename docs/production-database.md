@@ -10,7 +10,7 @@ Production API использует PostgreSQL, если задан `DATABASE_UR
 - `rag_ocr_sessions` - HTTP-only cookie sessions и CSRF token hash.
 - `rag_ocr_service_settings` - настройки OpenAI, Mistral, rerankers, Qdrant.
 - `rag_ocr_proxy_settings` - общий proxy URL в зашифрованном виде.
-- `rag_ocr_documents` - metadata документов, статусы pipeline, source/text paths.
+- `rag_ocr_documents` - metadata документов, статусы pipeline, source path, extracted text и preview.
 - `rag_ocr_document_chunks` - chunks для retrieval fallback и citations.
 - `rag_ocr_schema_migrations` - применённые миграции.
 
@@ -41,6 +41,8 @@ write(nextData: StoreData): Promise<void>
 ```
 
 `write()` по-прежнему означает полную замену состояния. В PostgreSQL это делается транзакционно: сначала очищаются дочерние таблицы, затем заново вставляется весь снимок.
+
+Новые документы хранят extracted text в `DocumentRecord.textContent`, который мапится в `rag_ocr_documents.text_content`. `textPath` остаётся legacy fallback для старых документов, которые были обработаны до переноса текста в store.
 
 ## Smoke checks
 

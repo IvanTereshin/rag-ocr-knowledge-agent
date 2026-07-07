@@ -106,7 +106,7 @@ docker compose --env-file .env.production -f docker-compose.production.yml up -d
 - JSON store остаётся fallback для разработки; production должен использовать `DATABASE_URL`.
 - Для масштабирования API и worker нужен общий Postgres и общий object storage.
 - Vector indexing выполняется и в API inline-flow, и в worker queued-flow. Если vector store недоступен, pipeline сохраняет chunks и работает через degraded retrieval.
-- Derived artifacts пока в основном живут в `DATA_DIR`; следующий шаг - переносить text/chunks metadata в object storage или нормальные таблицы.
+- Extracted text и chunks metadata сохраняются в store/Postgres. `textPath` остаётся legacy fallback для старых документов; source-файлы идут через object storage adapter.
 
 ## Минимальная проверка
 

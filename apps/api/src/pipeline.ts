@@ -1,5 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import mammoth from 'mammoth'
 import { PDFParse } from 'pdf-parse'
@@ -31,7 +30,7 @@ export function createPipelineSteps(): PipelineStepRecord[] {
   ]
 }
 
-export async function processDocument(document: DocumentRecord, textRoot: string): Promise<PipelineResult> {
+export async function processDocument(document: DocumentRecord, _textRoot: string): Promise<PipelineResult> {
   const startedAt = new Date().toISOString()
   let steps = startStep(createPipelineSteps(), 'extract', startedAt)
 
@@ -40,10 +39,6 @@ export async function processDocument(document: DocumentRecord, textRoot: string
     if (!extractedText) {
       throw new Error('Text was not found. For scans and images, connect OCR service in settings.')
     }
-
-    mkdirSync(join(textRoot, document.userId), { recursive: true })
-    const textPath = join(textRoot, document.userId, `${document.id}.txt`)
-    writeFileSync(textPath, extractedText)
 
     steps = completeStep(steps, 'extract', `Extracted ${extractedText.length} characters`)
     steps = startStep(steps, 'chunk')
@@ -73,7 +68,8 @@ export async function processDocument(document: DocumentRecord, textRoot: string
       document: {
         ...document,
         status: 'ready',
-        textPath,
+        textContent: extractedText,
+        textPath: document.textPath,
         textPreview: truncateText(extractedText, maxPreviewChars),
         chunkCount: chunks.length,
         pipeline: steps,
@@ -137,6 +133,10 @@ export function selectAnswerCandidates(question: string, chunks: DocumentChunkRe
 }
 
 export function readDocumentText(document: DocumentRecord): string {
+  if (document.textContent) {
+    return document.textContent
+  }
+
   if (!document.textPath) {
     return ''
   }

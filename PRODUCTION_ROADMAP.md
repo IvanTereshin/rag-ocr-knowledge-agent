@@ -19,6 +19,7 @@
 - `docker-compose.production.yml` с `app`, `worker`, `postgres`, `redis`, `minio`, `qdrant`, `tei`.
 - PostgreSQL persistence через `DATABASE_URL` с нормализованными таблицами.
 - Legacy migration из `rag_ocr_app_state` jsonb row в нормализованную схему.
+- Extracted text и chunks metadata сохраняются в store/Postgres, а не только в локальном `DATA_DIR`.
 - JSON store fallback для local dev.
 - Базовый rate limit.
 - Local TEI reranker на `BAAI/bge-reranker-base`.
@@ -173,9 +174,8 @@ Definition of Done:
 ## Приоритет Следующих Задач
 
 1. Добавить local LLM AnswerGenerator для Локального режима.
-2. Вынести derived text/chunks artifacts из shared volume в object storage или нормальные таблицы.
-3. Закрыть оставшиеся security hardening задачи и backup/restore runbook.
-4. Добавить отдельные migration files, если появится следующая версия схемы.
+2. Закрыть оставшиеся security hardening задачи и backup/restore runbook.
+3. Добавить отдельные migration files, если появится следующая версия схемы.
 
 ## Правило Для Агентов-Исполнителей
 
