@@ -65,6 +65,20 @@ const csrfHeaderName = (process.env.CSRF_HEADER_NAME?.trim() || 'x-csrf-token').
 const allowedCorsOrigins = parseCsvEnv(process.env.CORS_ORIGINS)
 const trustProxy = parseBooleanEnv(process.env.TRUST_PROXY, false)
 const appLogLevel = process.env.APP_LOG_LEVEL?.trim() || 'info'
+const securityHeadersEnabled = parseBooleanEnv(process.env.SECURITY_HEADERS_ENABLED, true)
+const hstsEnabled = parseBooleanEnv(process.env.SECURITY_HSTS_ENABLED, process.env.NODE_ENV === 'production')
+const contentSecurityPolicy = process.env.CONTENT_SECURITY_POLICY?.trim() || [
+  "default-src 'self'",
+  "base-uri 'self'",
+  "connect-src 'self'",
+  "font-src 'self' data:",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+  "img-src 'self' data: blob:",
+  "object-src 'none'",
+  "script-src 'self'",
+  "style-src 'self'",
+].join('; ')
 const vectorSearchLimit = parsePositiveInteger(process.env.VECTOR_SEARCH_LIMIT, maxRerankCandidates)
 const store = createStoreFromEnv()
 const jobQueue = createJobQueueFromEnv()
@@ -988,6 +1002,24 @@ function applyCorsHeaders(request: FastifyRequest, reply: FastifyReply) {
   reply.header('Vary', 'Origin')
 }
 
+function applySecurityHeaders(reply: FastifyReply) {
+  if (!securityHeadersEnabled) {
+    return
+  }
+
+  reply.header('Content-Security-Policy', contentSecurityPolicy)
+  reply.header('Cross-Origin-Opener-Policy', 'same-origin')
+  reply.header('Cross-Origin-Resource-Policy', 'same-origin')
+  reply.header('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=()')
+  reply.header('Referrer-Policy', 'no-referrer')
+  reply.header('X-Content-Type-Options', 'nosniff')
+  reply.header('X-Frame-Options', 'DENY')
+
+  if (hstsEnabled) {
+    reply.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains')
+  }
+}
+
 function originValidationError(request: FastifyRequest) {
   if (!isApiMutation(request)) {
     return undefined
@@ -1067,6 +1099,7 @@ async function main() {
   })
 
   app.addHook('onRequest', async (request, reply) => {
+    applySecurityHeaders(reply)
     applyCorsHeaders(request, reply)
 
     if (request.method.toUpperCase() === 'OPTIONS' && normalizedRequestPath(request).startsWith('/api/')) {

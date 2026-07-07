@@ -149,7 +149,9 @@
 
 ### 10. Добавить security headers
 
-Риск: приложение пока не задает явную browser security policy.
+Статус: базовый слой внедрён в `apps/api/src/server.ts`.
+
+Риск: без явной browser security policy браузер разрешает больше возможностей, чем нужно приложению.
 
 Где внедрять:
 
@@ -157,8 +159,9 @@
 
 Что сделать:
 
-- Добавить `Content-Security-Policy`, `frame-ancestors`, `Referrer-Policy`, `Permissions-Policy`.
+- Поддерживать `Content-Security-Policy`, `frame-ancestors`, `Referrer-Policy`, `Permissions-Policy`.
 - Проверить совместимость с Vite frontend и static assets.
+- Для нестандартного деплоя переопределять `CONTENT_SECURITY_POLICY` через env.
 
 ### 11. Сделать session и cookie поведение настраиваемым
 
