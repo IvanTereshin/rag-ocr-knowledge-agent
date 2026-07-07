@@ -116,3 +116,10 @@ docker compose --env-file .env.production -f docker-compose.production.yml up -d
 - `tei` - локальный reranker `BAAI/bge-reranker-base`.
 
 Если `DATABASE_URL` не задан, API использует локальный JSON store в `DATA_DIR`. Это удобно для разработки, но для production нужен PostgreSQL и стабильный `APP_SECRET`. Если поменять `APP_SECRET`, ранее сохранённые API-ключи нельзя будет расшифровать.
+
+Backup и restore для production описаны в [docs/production-backup-restore.md](docs/production-backup-restore.md). Для быстрого запуска есть shell-скрипты:
+
+```bash
+./scripts/backup-production.sh
+RESTORE_CONFIRM=YES RESTORE_WIPE=YES ./scripts/restore-production.sh ./backups/production/production-YYYYMMDD-HHMMSS
+```

@@ -2,6 +2,8 @@
 
 Этот runbook покрывает базовую диагностику production stack.
 
+Для backup/restore см. [docs/production-backup-restore.md](docs/production-backup-restore.md).
+
 ## Health endpoints
 
 Быстрая проверка API:
