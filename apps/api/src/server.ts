@@ -29,6 +29,7 @@ import { createStoreFromEnv } from './store.js'
 import { indexPipelineResultInVectorStore, searchVectorCandidatesInVectorStore } from './vector-indexing.js'
 import { generateOpenAIAnswer, generateOpenAICompatibleChatAnswer } from './answer-generation.js'
 import { checkDependencies } from './health.js'
+import { validateOutboundProxyUrl, validateOutboundServiceUrl } from './outbound-url.js'
 import type {
   DocumentChunkRecord,
   DocumentRecord,
@@ -742,6 +743,11 @@ function getSharedProxyUrl(proxy: ProxySettingsRecord) {
     return { error: 'Proxy URL is invalid' }
   }
 
+  const outboundError = validateOutboundProxyUrl(proxyUrl)
+  if (outboundError) {
+    return { error: outboundError }
+  }
+
   return { url: proxyUrl }
 }
 
@@ -775,6 +781,11 @@ async function validateService(
     new URL(service.baseUrl)
   } catch {
     return serviceValidation('invalid', 'Base URL is invalid')
+  }
+
+  const outboundError = validateOutboundServiceUrl(service.provider, service.baseUrl)
+  if (outboundError) {
+    return serviceValidation('invalid', outboundError)
   }
 
   try {
@@ -1686,14 +1697,19 @@ async function main() {
         } else if (proxyAppliesTo(rerankerService.provider) && sharedProxy.error) {
           warnings.push(sharedProxy.error)
         } else {
-          rankedChunks = await rerankWithProvider(
-            rerankerService,
-            apiKey,
-            proxyAppliesTo(rerankerService.provider) ? sharedProxy.url : undefined,
-            question,
-            retrievalCandidates,
-          )
-          engine = `${rerankerService.provider}-rerank`
+          const outboundError = validateOutboundServiceUrl(rerankerService.provider, rerankerService.baseUrl)
+          if (outboundError) {
+            warnings.push(outboundError)
+          } else {
+            rankedChunks = await rerankWithProvider(
+              rerankerService,
+              apiKey,
+              proxyAppliesTo(rerankerService.provider) ? sharedProxy.url : undefined,
+              question,
+              retrievalCandidates,
+            )
+            engine = `${rerankerService.provider}-rerank`
+          }
         }
       } catch (error) {
         const warning = mode === 'local' && rerankerService.provider === 'tei'
@@ -1744,20 +1760,25 @@ async function main() {
           } else if (needsProxy && sharedProxy.error) {
             warnings.push(sharedProxy.error)
           } else {
-            const answerOptions = {
-              service: answerService,
-              apiKey,
-              proxyUrl: needsProxy ? sharedProxy.url : undefined,
-              question,
-              citations: result.citations,
-              language: ruQuestion ? 'ru' as const : 'en' as const,
-            }
-            const generated = mode === 'cloud'
-              ? await generateOpenAIAnswer(answerOptions)
-              : await generateOpenAICompatibleChatAnswer(answerOptions)
+            const outboundError = validateOutboundServiceUrl(answerService.provider, answerService.baseUrl)
+            if (outboundError) {
+              warnings.push(outboundError)
+            } else {
+              const answerOptions = {
+                service: answerService,
+                apiKey,
+                proxyUrl: needsProxy ? sharedProxy.url : undefined,
+                question,
+                citations: result.citations,
+                language: ruQuestion ? 'ru' as const : 'en' as const,
+              }
+              const generated = mode === 'cloud'
+                ? await generateOpenAIAnswer(answerOptions)
+                : await generateOpenAICompatibleChatAnswer(answerOptions)
 
-            answer = generated.answer
-            answerEngine = generated.provider
+              answer = generated.answer
+              answerEngine = generated.provider
+            }
           }
         } catch (error) {
           const message = error instanceof Error ? error.message : 'Answer generation failed'

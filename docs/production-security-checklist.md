@@ -102,6 +102,8 @@
 
 ### 7. Защитить исходящие URL от SSRF
 
+Статус: базовая защита внедрена через `apps/api/src/outbound-url.ts`.
+
 Риск: пользовательские `baseUrl` и proxy URL могут указывать на внутренние сервисы.
 
 Где внедрять:
@@ -112,8 +114,10 @@
 Что сделать:
 
 - Проверять outbound URL перед сохранением.
-- Блокировать private и loopback адреса, кроме явно включенного local режима.
+- Блокировать private, loopback и single-label hostnames для cloud/proxy в production.
 - Оставить поддержку Local TEI и Qdrant, но сделать это осознанным исключением.
+- Если нужен нестандартный private endpoint, явно включать `ALLOW_PRIVATE_OUTBOUND_URLS=true`.
+- Дополнить это firewall/egress rules на уровне сервера, потому что app-level проверка не заменяет сетевую политику.
 
 ### 8. Почистить production logs
 

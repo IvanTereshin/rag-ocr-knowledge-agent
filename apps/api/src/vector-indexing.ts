@@ -3,6 +3,7 @@ import { createPipelineSteps } from './pipeline.js'
 import type { PipelineResult, RankedChunk } from './pipeline.js'
 import { createEmbeddingProvider, createQdrantClient } from './rag.js'
 import { decryptSecret } from './security.js'
+import { validateOutboundServiceUrl } from './outbound-url.js'
 import type { DocumentRecord, ProxySettingsRecord, ServiceProvider, ServiceSettingsRecord, StoreData } from './store.js'
 
 const embeddingModel = process.env.EMBEDDING_MODEL?.trim() || 'text-embedding-3-small'
@@ -131,6 +132,16 @@ function createVectorRuntime(data: StoreData, userId: string): VectorRuntime {
     new URL(qdrantService.baseUrl)
   } catch {
     return { ready: false, warning: 'Vector service Base URL is invalid' }
+  }
+
+  const openaiOutboundError = validateOutboundServiceUrl(openaiService.provider, openaiService.baseUrl)
+  if (openaiOutboundError) {
+    return { ready: false, warning: openaiOutboundError }
+  }
+
+  const qdrantOutboundError = validateOutboundServiceUrl(qdrantService.provider, qdrantService.baseUrl)
+  if (qdrantOutboundError) {
+    return { ready: false, warning: qdrantOutboundError }
   }
 
   const sharedProxy = getSharedProxyUrl(getProxySettings(data, userId))
