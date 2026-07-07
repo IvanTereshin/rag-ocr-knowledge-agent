@@ -13,6 +13,8 @@ services:
       WEB_DIST_DIR: /app/apps/web/dist
       DATABASE_URL: postgres://rag_ocr:${POSTGRES_PASSWORD}@postgres:5432/rag_ocr
       PROCESSING_MODE: ${PROCESSING_MODE:-queued}
+      QDRANT_BASE_URL: http://qdrant:6333
+      TEI_BASE_URL: http://tei:80
     depends_on:
       postgres:
         condition: service_healthy

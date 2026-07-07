@@ -28,6 +28,7 @@ import { createSourceObjectStorageFromEnv } from './object-storage.js'
 import { createStoreFromEnv } from './store.js'
 import { indexPipelineResultInVectorStore, searchVectorCandidatesInVectorStore } from './vector-indexing.js'
 import { generateOpenAIAnswer } from './answer-generation.js'
+import { checkDependencies } from './health.js'
 import type {
   DocumentChunkRecord,
   DocumentRecord,
@@ -1084,6 +1085,17 @@ async function main() {
     ok: true,
     service: 'rag-ocr-agent',
   }))
+
+  app.get('/api/health/dependencies', async (_request, reply) => {
+    const result = await checkDependencies({
+      store,
+      jobQueue,
+      sourceStorage,
+      processingMode,
+    })
+
+    return reply.code(result.ok ? 200 : 503).send(result)
+  })
 
   async function currentUser(request: FastifyRequest) {
     const token = request.cookies[cookieName]

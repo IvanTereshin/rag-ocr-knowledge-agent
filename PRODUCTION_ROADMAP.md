@@ -153,12 +153,14 @@ Definition of Done:
 
 ## Этап 6: Observability И Operations
 
+Статус: начат.
+
 Компоненты:
 
 - structured logs;
 - request id;
 - latency metrics;
-- health endpoints для dependencies;
+- health endpoints для dependencies: готово для store, Redis, object storage, Qdrant и TEI;
 - backup/restore procedure для Postgres, Qdrant, object storage;
 - deployment runbook.
 
@@ -173,9 +175,8 @@ Definition of Done:
 1. Добавить local LLM AnswerGenerator для Локального режима.
 2. Нормализовать PostgreSQL schema и добавить миграции.
 3. Вынести derived text/chunks artifacts из shared volume в object storage или нормальные таблицы.
-4. Добавить structured health checks для Redis, MinIO, Qdrant, TEI и AI providers.
-5. Добавить CI build/lint workflow.
-6. Закрыть оставшиеся security hardening задачи и backup/restore runbook.
+4. Добавить CI build/lint workflow.
+5. Закрыть оставшиеся security hardening задачи и backup/restore runbook.
 
 ## Правило Для Агентов-Исполнителей
 
