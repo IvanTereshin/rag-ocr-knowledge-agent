@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent, ComponentType, FormEvent } from 'react'
 import Bot from 'lucide-react/dist/esm/icons/bot.mjs'
+import AlertTriangle from 'lucide-react/dist/esm/icons/alert-triangle.mjs'
+import BookOpenCheck from 'lucide-react/dist/esm/icons/book-open-check.mjs'
 import Check from 'lucide-react/dist/esm/icons/check.mjs'
 import ChevronDown from 'lucide-react/dist/esm/icons/chevron-down.mjs'
 import CircleDot from 'lucide-react/dist/esm/icons/circle-dot.mjs'
@@ -9,6 +11,7 @@ import CloudUpload from 'lucide-react/dist/esm/icons/cloud-upload.mjs'
 import Database from 'lucide-react/dist/esm/icons/database.mjs'
 import FileSpreadsheet from 'lucide-react/dist/esm/icons/file-spreadsheet.mjs'
 import FileText from 'lucide-react/dist/esm/icons/file-text.mjs'
+import FileSearch from 'lucide-react/dist/esm/icons/file-search.mjs'
 import FolderKanban from 'lucide-react/dist/esm/icons/folder-kanban.mjs'
 import Languages from 'lucide-react/dist/esm/icons/languages.mjs'
 import Layers3 from 'lucide-react/dist/esm/icons/layers-3.mjs'
@@ -16,6 +19,7 @@ import Menu from 'lucide-react/dist/esm/icons/menu.mjs'
 import MessageSquareText from 'lucide-react/dist/esm/icons/message-square-text.mjs'
 import MoreHorizontal from 'lucide-react/dist/esm/icons/more-horizontal.mjs'
 import Paperclip from 'lucide-react/dist/esm/icons/paperclip.mjs'
+import Quote from 'lucide-react/dist/esm/icons/quote.mjs'
 import Search from 'lucide-react/dist/esm/icons/search.mjs'
 import SendHorizontal from 'lucide-react/dist/esm/icons/send-horizontal.mjs'
 import KeyRound from 'lucide-react/dist/esm/icons/key-round.mjs'
@@ -47,6 +51,7 @@ import type { Language } from './data'
 type IconComponent = ComponentType<{ size?: number | string; className?: string }>
 type DocumentsStatus = 'loading' | 'ready' | 'uploading'
 type PipelineStep = UserDocument['pipeline'][number]
+type AnswerCitation = AskResponse['citations'][number]
 const rerankerProviders = ['cohere', 'voyage', 'jina', 'tei'] as const
 type RerankerProvider = (typeof rerankerProviders)[number]
 
@@ -89,9 +94,13 @@ const fileIcons: Record<string, IconComponent> = {
   XLS: FileSpreadsheet,
   XLSX: FileSpreadsheet,
   CSV: FileSpreadsheet,
+  TSV: FileSpreadsheet,
+  JSON: FileText,
+  LOG: FileText,
   PNG: FileText,
   JPG: FileText,
   JPEG: FileText,
+  WEBP: FileText,
   FILE: FileText,
 }
 
@@ -322,6 +331,19 @@ const workspaceText = {
     documentsCount: 'Документы',
     sourcesCount: 'Источники',
     settingsCount: 'Сервисы',
+    evidenceDesk: 'Evidence desk',
+    evidenceDeskSubtitle: 'Документ, ответ и доказательства в одном рабочем контексте.',
+    library: 'Библиотека',
+    documentView: 'Документ',
+    verifiedAnswer: 'Проверяемый ответ',
+    shortConclusion: 'Короткий вывод',
+    evidenceFound: 'Подтверждено источниками',
+    lowConfidence: 'Низкая уверенность — проверьте фрагменты',
+    noEvidence: 'В базе знаний нет подтверждающего фрагмента',
+    partialFailure: 'Часть документов обработана с ошибкой',
+    citationInspector: 'Инспектор источника',
+    openFragment: 'Открыт подтверждающий фрагмент',
+    relevance: 'Релевантность',
   },
   en: {
     overviewTitle: 'Workspace',
@@ -361,6 +383,19 @@ const workspaceText = {
     documentsCount: 'Documents',
     sourcesCount: 'Sources',
     settingsCount: 'Services',
+    evidenceDesk: 'Evidence desk',
+    evidenceDeskSubtitle: 'Document, answer, and evidence in one working context.',
+    library: 'Library',
+    documentView: 'Document',
+    verifiedAnswer: 'Verifiable answer',
+    shortConclusion: 'Short conclusion',
+    evidenceFound: 'Supported by sources',
+    lowConfidence: 'Low confidence — review the excerpts',
+    noEvidence: 'No supporting excerpt was found',
+    partialFailure: 'Some documents failed to process',
+    citationInspector: 'Source inspector',
+    openFragment: 'Supporting excerpt opened',
+    relevance: 'Relevance',
   },
 } as const
 
@@ -378,6 +413,7 @@ function App() {
   const [askResult, setAskResult] = useState<AskResponse | null>(null)
   const [askStatus, setAskStatus] = useState<'idle' | 'asking'>('idle')
   const [askError, setAskError] = useState('')
+  const [selectedCitationId, setSelectedCitationId] = useState('')
   const documentsPollingTimeoutRef = useRef<number | null>(null)
   const t = copy[language]
 
@@ -501,6 +537,11 @@ function App() {
     [documents, selectedDocumentId],
   )
 
+  const selectedCitation = useMemo(
+    () => askResult?.citations.find((citation) => citation.id === selectedCitationId) ?? askResult?.citations[0],
+    [askResult, selectedCitationId],
+  )
+
   function switchLanguage(nextLanguage: Language) {
     setLanguage(nextLanguage)
     setQuestion(copy[nextLanguage].question)
@@ -596,11 +637,20 @@ function App() {
     try {
       const response = await api.ask(trimmedQuestion, agentMode)
       setAskResult(response)
+      setSelectedCitationId(response.citations[0]?.id ?? '')
+      if (response.citations[0]?.documentId) {
+        setSelectedDocumentId(response.citations[0].documentId)
+      }
     } catch (error) {
       setAskError(error instanceof Error ? error.message : workspaceText[language].askError)
     } finally {
       setAskStatus('idle')
     }
+  }
+
+  function setSelectedCitationFromAnswer(citation: AnswerCitation) {
+    setSelectedCitationId(citation.id)
+    setSelectedDocumentId(citation.documentId)
   }
 
   function renderWorkspace() {
@@ -617,7 +667,22 @@ function App() {
         )
       case 1:
         return (
-          <section className="content-grid" aria-label={workspaceText[language].documentsTitle}>
+          <section className="evidence-desk" aria-label={workspaceText[language].documentsTitle}>
+            <header className="evidence-desk-header">
+              <div>
+                <span className="desk-eyebrow"><BookOpenCheck size={15} /> {workspaceText[language].evidenceDesk}</span>
+                <h1>{workspaceText[language].documentsTitle}</h1>
+                <p>{workspaceText[language].evidenceDeskSubtitle}</p>
+              </div>
+              <span className="desk-mode-note">
+                {agentMode === 'cloud' ? workspaceText[language].portfolioMode : workspaceText[language].localMode}
+              </span>
+            </header>
+            <div className="evidence-mobile-steps" aria-label="Workspace sequence">
+              <span className="active">01 {workspaceText[language].library}</span>
+              <span>02 {workspaceText[language].documentView}</span>
+              <span>03 {workspaceText[language].verifiedAnswer}</span>
+            </div>
             <DocumentsPanel
               documents={documents}
               error={documentsError}
@@ -627,7 +692,12 @@ function App() {
               onSelectDocument={setSelectedDocumentId}
               onUpload={handleUpload}
             />
-            <ProcessingPanel document={selectedDocument} language={language} onProcessDocument={handleProcessDocument} />
+            <ProcessingPanel
+              citation={selectedCitation}
+              document={selectedDocument}
+              language={language}
+              onProcessDocument={handleProcessDocument}
+            />
             <AnswerPanel
               askError={askError}
               askResult={askResult}
@@ -637,8 +707,9 @@ function App() {
               question={question}
               onAsk={handleAsk}
               onQuestionChange={setQuestion}
+              selectedCitationId={selectedCitation?.id ?? ''}
+              onSelectCitation={setSelectedCitationFromAnswer}
             />
-            <CompareStrip language={language} />
           </section>
         )
       case 2:
@@ -655,6 +726,8 @@ function App() {
                 question={question}
                 onAsk={handleAsk}
                 onQuestionChange={setQuestion}
+                selectedCitationId={selectedCitation?.id ?? ''}
+                onSelectCitation={setSelectedCitationFromAnswer}
               />
             </div>
           </section>
@@ -666,7 +739,12 @@ function App() {
           <section className="workspace-page">
             <PageHeader agentMode={agentMode} language={language} title={workspaceText[language].pipelineTitle} />
             <div className="single-panel-layout">
-              <ProcessingPanel document={selectedDocument} language={language} onProcessDocument={handleProcessDocument} />
+              <ProcessingPanel
+                citation={selectedCitation}
+                document={selectedDocument}
+                language={language}
+                onProcessDocument={handleProcessDocument}
+              />
             </div>
           </section>
         )
@@ -1421,8 +1499,9 @@ function DocumentsPanel({
           ref={inputRef}
           className="upload-input"
           type="file"
+          aria-label={t.upload}
           multiple
-          accept=".pdf,.docx,.txt,.md,.csv"
+          accept=".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,.md,.csv,.tsv,.json,.log,.png,.jpg,.jpeg,.webp"
           onChange={handleFileChange}
         />
       </div>
@@ -1544,10 +1623,12 @@ function PipelineSteps({ document, language }: { document?: UserDocument; langua
 function ProcessingPanel({
   language,
   document,
+  citation,
   onProcessDocument,
 }: {
   language: Language
   document?: UserDocument
+  citation?: AnswerCitation
   onProcessDocument: (documentId: string) => void
 }) {
   const t = copy[language]
@@ -1556,7 +1637,10 @@ function ProcessingPanel({
   return (
     <section className="panel processing-panel">
       <div className="panel-heading compact">
-        <h2>{t.pipeline}</h2>
+        <div>
+          <span className="panel-kicker">02 · {text.documentView}</span>
+          <h2>{document?.name ?? t.pipeline}</h2>
+        </div>
         {document && document.status !== 'ready' && (
           <button className="secondary-button compact-action" type="button" onClick={() => onProcessDocument(document.id)}>
             <CircleDot size={15} />
@@ -1598,6 +1682,13 @@ function ProcessingPanel({
             <span className="paper-source">{text.uploadedFile}</span>
             <h3>{document.name}</h3>
             <p>{document.error || document.textPreview || text.nextStage}</p>
+            {citation?.documentId === document.id && (
+              <aside className="source-highlight" aria-live="polite">
+                <span><Quote size={15} /> {text.openFragment}</span>
+                <strong>{citationSourceLabel(citation, language) || `${text.chunks}: ${citation.chunkIndex + 1}`}</strong>
+                <p>{citation.text}</p>
+              </aside>
+            )}
             <div className="metadata-grid">
               <span>{text.type}</span>
               <strong>{normalizeFileType(document.fileType)}</strong>
@@ -1630,6 +1721,8 @@ function AnswerPanel({
   documents,
   onAsk,
   onQuestionChange,
+  selectedCitationId,
+  onSelectCitation,
 }: {
   askError: string
   askResult: AskResponse | null
@@ -1639,6 +1732,8 @@ function AnswerPanel({
   documents: UserDocument[]
   onAsk: () => void
   onQuestionChange: (value: string) => void
+  selectedCitationId: string
+  onSelectCitation: (citation: AnswerCitation) => void
 }) {
   const t = copy[language]
   const text = workspaceText[language]
@@ -1646,6 +1741,18 @@ function AnswerPanel({
   const hasReadyDocuments = readyDocuments.length > 0
   const answerText = askStatus === 'asking' ? text.askWorking : askResult?.answer || (hasReadyDocuments ? text.answerReady : text.answerEmpty)
   const citations = askResult?.citations ?? []
+  const averageScore = citations.length
+    ? citations.reduce((total, citation) => total + citation.score, 0) / citations.length
+    : 0
+  const hasFailedDocuments = documents.some((document) => document.status === 'failed')
+  const evidenceState = askResult
+    ? citations.length === 0
+      ? 'none'
+      : averageScore < 0.58 || Boolean(askResult.warning)
+        ? 'low'
+        : 'verified'
+    : 'idle'
+  const activeCitation = citations.find((citation) => citation.id === selectedCitationId) ?? citations[0]
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -1655,8 +1762,26 @@ function AnswerPanel({
   return (
     <section className="panel answer-panel">
       <div className="panel-heading compact">
-        <h2>{t.ask}</h2>
-        <Languages size={18} />
+        <div>
+          <span className="panel-kicker">03 · {text.verifiedAnswer}</span>
+          <h2>{t.ask}</h2>
+        </div>
+        <Languages size={18} aria-hidden="true" />
+      </div>
+
+      <div className="evidence-state-stack" aria-live="polite">
+        {evidenceState === 'verified' && (
+          <span className="evidence-state verified"><BookOpenCheck size={15} /> {text.evidenceFound}</span>
+        )}
+        {evidenceState === 'low' && (
+          <span className="evidence-state caution"><AlertTriangle size={15} /> {text.lowConfidence}</span>
+        )}
+        {evidenceState === 'none' && (
+          <span className="evidence-state danger"><FileSearch size={15} /> {text.noEvidence}</span>
+        )}
+        {hasFailedDocuments && (
+          <span className="evidence-state caution"><AlertTriangle size={15} /> {text.partialFailure}</span>
+        )}
       </div>
 
       <div className="chat-stack">
@@ -1665,10 +1790,11 @@ function AnswerPanel({
           <span>10:24 AM <Check size={14} /></span>
         </div>
 
-        <div className="answer-card">
+        <div className="answer-card structured-answer">
+          <span className="answer-label">{text.shortConclusion}</span>
           <p>{answerText}</p>
           <footer>
-            <span>10:24 AM</span>
+            <span>{askResult?.engine ?? (askStatus === 'asking' ? text.askWorking : 'Evidence desk')}</span>
             <span>{hasReadyDocuments ? `${citations.length} ${t.citations.toLowerCase()}` : text.noDocuments}</span>
           </footer>
         </div>
@@ -1685,16 +1811,24 @@ function AnswerPanel({
       {citations.length ? (
         <div className="citations-list">
           {citations.map((citation, index) => (
-            <article key={citation.id} className={index === 0 ? 'citation-card selected' : 'citation-card'}>
+            <button
+              key={citation.id}
+              className={citation.id === activeCitation?.id ? 'citation-card selected' : 'citation-card'}
+              type="button"
+              onClick={() => onSelectCitation(citation)}
+              aria-pressed={citation.id === activeCitation?.id}
+            >
               <span className="citation-index">{index + 1}</span>
               <div>
                 <strong>{citation.documentName}</strong>
                 <small>
-                  {text.chunks}: {citation.chunkIndex + 1} · score {citation.score.toFixed(1)}
+                  {[`${text.chunks}: ${citation.chunkIndex + 1}`, citationSourceLabel(citation, language), `score ${citation.score.toFixed(1)}`]
+                    .filter(Boolean)
+                    .join(' · ')}
                 </small>
                 <p>{citation.text}</p>
               </div>
-            </article>
+            </button>
           ))}
         </div>
       ) : (
@@ -1702,6 +1836,18 @@ function AnswerPanel({
           <FileText size={22} />
           <strong>{hasReadyDocuments ? t.citations : text.noDocuments}</strong>
         </div>
+      )}
+
+      {activeCitation && (
+        <aside className="citation-inspector">
+          <header>
+            <span><FileSearch size={16} /> {text.citationInspector}</span>
+            <strong>{Math.round(Math.min(1, Math.max(0, activeCitation.score)) * 100)}% {text.relevance.toLowerCase()}</strong>
+          </header>
+          <h3>{activeCitation.documentName}</h3>
+          <small>{citationSourceLabel(activeCitation, language) || `${text.chunks}: ${activeCitation.chunkIndex + 1}`}</small>
+          <blockquote>{activeCitation.text}</blockquote>
+        </aside>
       )}
 
       <form className="ask-input" onSubmit={handleSubmit}>
@@ -1745,8 +1891,9 @@ function SourcesPage({
         ref={inputRef}
         className="upload-input"
         type="file"
+        aria-label={copy[language].upload}
         multiple
-        accept=".pdf,.docx,.txt,.md,.csv"
+        accept=".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,.md,.csv,.tsv,.json,.log,.png,.jpg,.jpeg,.webp"
         onChange={handleFileChange}
       />
       {documents.length ? (
@@ -1858,6 +2005,36 @@ function statusLabel(status: UserDocument['status'], language: Language) {
   }
 
   return copy[language][status]
+}
+
+function citationSourceLabel(citation: AskResponse['citations'][number], language: Language) {
+  const source = citation.source
+  if (!source) {
+    return ''
+  }
+
+  const labels = language === 'ru'
+    ? { page: 'стр.', slide: 'слайд', sheet: 'лист', rows: 'строки' }
+    : { page: 'page', slide: 'slide', sheet: 'sheet', rows: 'rows' }
+  const parts: string[] = []
+
+  if (source.page) {
+    parts.push(`${labels.page} ${source.page}`)
+  }
+
+  if (source.slide) {
+    parts.push(`${labels.slide} ${source.slide}`)
+  }
+
+  if (source.sheet) {
+    parts.push(`${labels.sheet} ${source.sheet}`)
+  }
+
+  if (source.rowRange) {
+    parts.push(`${labels.rows} ${source.rowRange}`)
+  }
+
+  return parts.join(' · ')
 }
 
 function pipelineStatusLabel(step: PipelineStep, language: Language) {

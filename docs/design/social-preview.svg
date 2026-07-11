@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title description">
+  <title id="title">RAG OCR Knowledge Agent — Evidence Desk</title>
+  <desc id="description">Проверяемые ответы по корпоративным документам</desc>
+  <rect width="1280" height="640" fill="#0f1d2d"/>
+  <path d="M0 72h1280M0 568h1280" stroke="#425266" stroke-width="1"/>
+  <g fill="none" stroke="#26384a" stroke-width="1" opacity=".75">
+    <path d="M72 0v640M1208 0v640"/>
+    <path d="M0 144h1280M0 496h1280" stroke-dasharray="4 10"/>
+  </g>
+  <rect x="72" y="72" width="1136" height="496" rx="2" fill="#f4f1e9"/>
+  <rect x="72" y="72" width="272" height="496" fill="#15283a"/>
+  <rect x="104" y="112" width="48" height="48" rx="2" fill="#1b554f"/>
+  <path d="M121 135h14m-7-7v14" stroke="#d9eee8" stroke-width="3" stroke-linecap="square"/>
+  <text x="168" y="142" fill="#f4f1e9" font-family="Arial, Helvetica, sans-serif" font-size="23" font-weight="700">RAG OCR</text>
+  <g fill="#aab5bd" font-family="Arial, Helvetica, sans-serif" font-size="17" font-weight="600">
+    <text x="108" y="222">01  БИБЛИОТЕКА</text>
+    <text x="108" y="278">02  ДОКУМЕНТ</text>
+    <text x="108" y="334">03  ОТВЕТ</text>
+  </g>
+  <rect x="96" y="248" width="224" height="54" fill="#d9e8e3" opacity=".15"/>
+  <text x="400" y="140" fill="#1b554f" font-family="Courier New, monospace" font-size="16" font-weight="700" letter-spacing="2">EVIDENCE DESK / P0</text>
+  <text x="400" y="220" fill="#0f1d2d" font-family="Arial, Helvetica, sans-serif" font-size="64" font-weight="800">Ответ, которому</text>
+  <text x="400" y="290" fill="#0f1d2d" font-family="Arial, Helvetica, sans-serif" font-size="64" font-weight="800">можно доверять.</text>
+  <text x="402" y="346" fill="#61707d" font-family="Arial, Helvetica, sans-serif" font-size="24">Документ · страница · чанк · подтверждающий фрагмент</text>
+  <rect x="400" y="396" width="340" height="112" fill="#dbe9e5"/>
+  <rect x="400" y="396" width="6" height="112" fill="#1b554f"/>
+  <text x="430" y="430" fill="#1b554f" font-family="Courier New, monospace" font-size="14" font-weight="700" letter-spacing="1.5">ПОДТВЕРЖДЕНО ИСТОЧНИКАМИ</text>
+  <text x="430" y="470" fill="#0f1d2d" font-family="Arial, Helvetica, sans-serif" font-size="21" font-weight="700">стр. 19 · score 0.91</text>
+  <rect x="772" y="396" width="364" height="112" fill="#0f1d2d"/>
+  <text x="800" y="430" fill="#83c3b5" font-family="Courier New, monospace" font-size="14" font-weight="700" letter-spacing="1.5">ИНСПЕКТОР ИСТОЧНИКА</text>
+  <text x="800" y="470" fill="#f4f1e9" font-family="Arial, Helvetica, sans-serif" font-size="21" font-weight="700">Evidence Desk QA Report.pdf</text>
+  <text x="400" y="548" fill="#83909a" font-family="Courier New, monospace" font-size="14">REACT · FASTIFY · QDRANT · OCR · TEI</text>
+</svg>

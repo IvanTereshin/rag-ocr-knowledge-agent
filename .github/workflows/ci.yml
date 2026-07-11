@@ -31,11 +31,20 @@ jobs:
       - name: Install API dependencies
         run: npm ci --prefix apps/api
 
+      - name: Audit API production dependencies
+        run: npm audit --prefix apps/api --omit=dev
+
+      - name: Audit frontend production dependencies
+        run: npm audit --prefix apps/web --omit=dev
+
       - name: Lint frontend
         run: npm run lint
 
       - name: Build applications
         run: npm run build
+
+      - name: Retrieval eval
+        run: npm run test:eval:retrieval
 
       - name: Smoke test local RAG and LLM
         run: npm run test:smoke:local-llm

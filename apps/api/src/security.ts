@@ -48,6 +48,16 @@ export function hashSessionToken(token: string): string {
   return createHash('sha256').update(token).digest('hex')
 }
 
+export function verifySessionTokenHash(token: string, expectedHash: string): boolean {
+  if (!/^[0-9a-f]{64}$/i.test(expectedHash)) {
+    return false
+  }
+
+  const actual = Buffer.from(hashSessionToken(token), 'hex')
+  const expected = Buffer.from(expectedHash, 'hex')
+  return actual.length === expected.length && timingSafeEqual(actual, expected)
+}
+
 export function getEncryptionKey(): Buffer {
   const secret = process.env.APP_SECRET?.trim() || localDevelopmentSecret
   return scryptSync(secret, keySalt, 32)

@@ -9,7 +9,10 @@
     "build:api": "npm --prefix apps/api run build",
     "worker": "npm --prefix apps/api run worker",
     "lint": "npm --prefix apps/web run lint",
+    "test:csrf": "npm --prefix apps/api run test:csrf",
+    "test:csrf:web": "node --experimental-strip-types --test apps/web/tests/csrf-compat.test.mjs",
     "preview": "npm --prefix apps/web run preview",
+    "test:eval:retrieval": "node scripts/eval-retrieval.mjs",
     "test:smoke:local-llm": "node scripts/smoke-rag.mjs local-llm",
     "test:smoke:cloud-openai": "node scripts/smoke-rag.mjs cloud-openai"
   }
