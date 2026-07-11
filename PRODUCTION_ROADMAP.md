@@ -25,6 +25,10 @@
 - Local TEI reranker на `BAAI/bge-reranker-base`.
 - Fail-fast production checks для `APP_SECRET`.
 - CI build/lint workflow в GitHub Actions.
+- Citation metadata для chunks: file/page/slide/sheet/rowRange/layout.
+- Server-side upload validation по extension, MIME и magic bytes.
+- Опциональный ClamAV scan до записи upload в storage.
+- Production eval script `npm run test:eval:retrieval`.
 
 Что ещё нужно закрыть:
 
@@ -174,9 +178,9 @@ Definition of Done:
 
 ## Приоритет Следующих Задач
 
-1. Закрыть оставшиеся security hardening задачи и backup/restore runbook.
-2. Добавить отдельные migration files, если появится следующая версия схемы.
-3. Добавить production E2E tests для cloud/local режимов.
+1. Добавить production E2E tests для cloud/local режимов с реальным compose stack.
+2. Добавить закрытый eval-pack на 20-30 вопросов и отчёт как CI artifact.
+3. Добавить LibreOffice conversion worker для legacy `DOC/PPT/XLS`, если эти форматы критичны без Mistral OCR.
 
 ## Правило Для Агентов-Исполнителей
 

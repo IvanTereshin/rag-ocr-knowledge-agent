@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { connect } from 'node:net'
 import { createClient } from 'redis'
 import type { JobQueue } from './queue.js'
 import type { ObjectStorageAdapter } from './object-storage.js'
@@ -35,6 +36,7 @@ export async function checkDependencies(options: DependencyHealthOptions): Promi
     checkStore(options.store),
     checkQueue(options.jobQueue, options.processingMode),
     checkObjectStorage(options.sourceStorage, options.processingMode),
+    checkClamAv(),
     checkHttpDependency({
       name: 'qdrant',
       baseUrl: process.env.QDRANT_BASE_URL,
@@ -55,6 +57,25 @@ export async function checkDependencies(options: DependencyHealthOptions): Promi
     checkedAt: new Date().toISOString(),
     checks,
   }
+}
+
+function checkClamAv() {
+  const enabled = parseBooleanEnv(process.env.UPLOAD_SCAN_ENABLED, false)
+  if (!enabled) {
+    return skippedCheck('clamav', false, 'Upload scan is disabled')
+  }
+
+  const host = process.env.CLAMAV_HOST?.trim() || 'clamav'
+  const port = parsePositiveInteger(process.env.CLAMAV_PORT, 3310)
+
+  return runCheck('clamav', true, async () => {
+    const response = await pingClamd(host, port)
+    if (!/\bPONG\b/i.test(response)) {
+      throw new Error(`Unexpected ClamAV response: ${response || 'empty response'}`)
+    }
+
+    return 'Reachable'
+  })
 }
 
 function checkStore(store: AppStore) {
@@ -215,4 +236,33 @@ function compactMessage(message: string) {
 function parsePositiveInteger(value: string | undefined, fallback: number) {
   const parsed = Number(value)
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback
+}
+
+function parseBooleanEnv(value: string | undefined, fallback: boolean) {
+  if (!value) {
+    return fallback
+  }
+
+  return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase())
+}
+
+async function pingClamd(host: string, port: number): Promise<string> {
+  return await new Promise((resolve, reject) => {
+    const socket = connect({ host, port })
+    let response = ''
+
+    socket.once('connect', () => {
+      socket.write('zPING\0')
+    })
+
+    socket.on('data', (chunk) => {
+      response += chunk.toString('utf8')
+    })
+
+    socket.once('end', () => {
+      resolve(response.replace(/\0/g, '').trim())
+    })
+
+    socket.once('error', reject)
+  })
 }

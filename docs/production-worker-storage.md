@@ -36,6 +36,8 @@ PROCESSING_MODE=inline
 - `apps/api/src/queue.ts` - Redis-backed queue и in-memory/inline fallback.
 - `apps/api/src/object-storage.ts` - local storage adapter и S3-compatible MinIO adapter.
 - `apps/api/src/pipeline.ts` - extraction, OCR fallback, chunking.
+- `apps/api/src/upload-validation.ts` - server-side MIME/signature/size validation.
+- `apps/api/src/virus-scan.ts` - optional ClamAV scan before processing.
 - `apps/web/src/App.tsx` - polling статусов `queued` / `processing`.
 
 ## Очередь
@@ -66,6 +68,66 @@ S3_FORCE_PATH_STYLE=true
 ```
 
 Если S3-настройки не заданы, adapter использует локальную папку внутри `DATA_DIR`. Это удобно для local dev, но для настоящего production лучше MinIO/S3.
+
+## Upload validation
+
+API проверяет файлы на сервере, а не доверяет browser `accept`.
+
+Поддерживаемые extension groups:
+
+```text
+PDF
+DOC/DOCX
+PPT/PPTX
+XLS/XLSX
+TXT/MD
+CSV/TSV
+JSON/LOG
+PNG/JPG/JPEG/WEBP
+```
+
+Для бинарных форматов проверяются magic bytes:
+
+- PDF: `%PDF`
+- OOXML: ZIP signature для `docx/pptx/xlsx`
+- legacy Office: compound file signature для `doc/ppt/xls`
+- images: PNG/JPEG/WebP signatures
+
+Важно: `DOC`, `PPT`, `XLS` сейчас принимаются на upload, но для локального parsing нужны либо Mistral OCR, либо отдельный LibreOffice conversion worker. Без этого документ завершится `failed` с понятной ошибкой.
+
+## OCR
+
+Для сканированных PDF, изображений и legacy `DOC/PPT` можно включить Mistral OCR:
+
+```bash
+MISTRAL_OCR_API_KEY=...
+MISTRAL_OCR_BASE_URL=https://api.mistral.ai/v1
+MISTRAL_OCR_MODEL=mistral-ocr-latest
+OCR_REQUEST_TIMEOUT_MS=60000
+```
+
+Pipeline сначала пытается прочитать текст локально. Если PDF пустой после text extraction, он переходит на OCR. Изображения сразу требуют OCR.
+
+OCR output сохраняется как обычные chunks с `source.page`, `layout.blockType`, `layout.confidence` и `layout.bbox`, если provider вернул эти поля.
+
+## Antivirus scan
+
+Перед записью файла в storage можно включить ClamAV/clamd:
+
+```bash
+UPLOAD_SCAN_ENABLED=true
+CLAMAV_HOST=clamav
+CLAMAV_PORT=3310
+UPLOAD_SCAN_TIMEOUT_MS=30000
+```
+
+В production compose ClamAV вынесен в optional profile:
+
+```bash
+docker compose --profile security --env-file .env.production -f docker-compose.production.yml up -d --build
+```
+
+Если `UPLOAD_SCAN_ENABLED=true`, но clamd недоступен или вернул не-OK, upload отклоняется до parsing.
 
 Рекомендуемый layout ключей:
 
@@ -124,3 +186,11 @@ Smoke-flow:
 3. увидеть статус `queued`, затем `processing`, затем `ready`;
 4. задать вопрос по документу;
 5. проверить, что ответ содержит sources.
+
+Quality gate:
+
+```bash
+npm run test:eval:retrieval
+```
+
+Подробнее: [production-evals.md](production-evals.md).

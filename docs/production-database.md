@@ -11,7 +11,7 @@ Production API использует PostgreSQL, если задан `DATABASE_UR
 - `rag_ocr_service_settings` - настройки OpenAI, Mistral, rerankers, Qdrant.
 - `rag_ocr_proxy_settings` - общий proxy URL в зашифрованном виде.
 - `rag_ocr_documents` - metadata документов, статусы pipeline, source path, extracted text и preview.
-- `rag_ocr_document_chunks` - chunks для retrieval fallback и citations.
+- `rag_ocr_document_chunks` - chunks для retrieval fallback и citations, включая `source` и `layout` metadata.
 - `rag_ocr_schema_migrations` - применённые миграции.
 
 Секреты остаются зашифрованными через `APP_SECRET`; база не должна хранить raw API keys.
@@ -50,6 +50,26 @@ write(nextData: StoreData): Promise<void>
 
 Новые документы хранят extracted text в `DocumentRecord.textContent`, который мапится в `rag_ocr_documents.text_content`. `textPath` остаётся legacy fallback для старых документов, которые были обработаны до переноса текста в store.
 
+Chunks хранят citation metadata:
+
+```json
+{
+  "source": {
+    "fileName": "pricing.xlsx",
+    "fileType": "XLSX",
+    "sheet": "Plans",
+    "rowRange": "1-25"
+  },
+  "layout": {
+    "blockType": "sheet-rows",
+    "confidence": 0.98,
+    "bbox": [120, 250, 900, 400]
+  }
+}
+```
+
+Для старых chunks эти поля могут быть `null`.
+
 ## Smoke checks
 
 Минимум после изменения схемы:
@@ -66,5 +86,6 @@ Runtime check с `DATABASE_URL`:
 3. upload `.txt`;
 4. `/api/ask`;
 5. проверить counts в `rag_ocr_users`, `rag_ocr_documents`, `rag_ocr_document_chunks`.
+6. проверить, что новые chunks содержат `source` metadata.
 
 Legacy check: создать `rag_ocr_app_state`, запустить API/Store, убедиться, что user/document появились в нормализованных таблицах и повторный старт не создаёт дубликаты.

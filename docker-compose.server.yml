@@ -3,9 +3,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    container_name: demo-rag-ocr
     restart: unless-stopped
     env_file:
-      - .env.production
+      - .env.server
     environment:
       NODE_ENV: production
       PORT: 3000
@@ -31,8 +32,16 @@ services:
         condition: service_started
     volumes:
       - app_data:/app/data
-    ports:
-      - "${APP_PORT:-3000}:3000"
+    networks:
+      - web
+      - internal
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=web
+      - traefik.http.routers.rag-ocr.rule=Host(`${APP_HOST:-rag-ocr.ivantereshin-test.store}`)
+      - traefik.http.routers.rag-ocr.entrypoints=websecure
+      - traefik.http.routers.rag-ocr.tls.certresolver=le
+      - traefik.http.services.rag-ocr.loadbalancer.server.port=3000
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
@@ -44,14 +53,18 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    container_name: demo-rag-ocr-worker
     restart: unless-stopped
     command: ["node", "dist/worker.js"]
     env_file:
-      - .env.production
+      - .env.server
     environment:
       NODE_ENV: production
       DATA_DIR: /app/data
       DATABASE_URL: postgres://rag_ocr:${POSTGRES_PASSWORD}@postgres:5432/rag_ocr
+      PROCESSING_MODE: ${PROCESSING_MODE:-queued}
+      QDRANT_BASE_URL: http://qdrant:6333
+      TEI_BASE_URL: http://tei:80
     depends_on:
       postgres:
         condition: service_healthy
@@ -65,6 +78,8 @@ services:
         condition: service_started
     volumes:
       - app_data:/app/data
+    networks:
+      - internal
 
   postgres:
     image: postgres:16-alpine
@@ -75,6 +90,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    networks:
+      - internal
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U rag_ocr -d rag_ocr"]
       interval: 10s
@@ -86,8 +103,8 @@ services:
     restart: unless-stopped
     volumes:
       - qdrant_data:/qdrant/storage
-    ports:
-      - "${QDRANT_PORT:-6333}:6333"
+    networks:
+      - internal
 
   tei:
     image: ${TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-arm64-latest}
@@ -103,8 +120,8 @@ services:
       HF_HOME: /data
     volumes:
       - tei_cache:/data
-    ports:
-      - "${TEI_PORT:-8080}:80"
+    networks:
+      - internal
 
   redis:
     image: redis:7-alpine
@@ -112,8 +129,8 @@ services:
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis_data:/data
-    ports:
-      - "${REDIS_PORT:-6379}:6379"
+    networks:
+      - internal
 
   minio:
     image: minio/minio:latest
@@ -124,9 +141,8 @@ services:
       MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY}
     volumes:
       - minio_data:/data
-    ports:
-      - "${MINIO_API_PORT:-9000}:9000"
-      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    networks:
+      - internal
 
   clamav:
     image: clamav/clamav:stable
@@ -134,6 +150,8 @@ services:
     profiles: ["security"]
     volumes:
       - clamav_data:/var/lib/clamav
+    networks:
+      - internal
 
 volumes:
   app_data:
@@ -143,3 +161,8 @@ volumes:
   redis_data:
   minio_data:
   clamav_data:
+
+networks:
+  web:
+    external: true
+  internal:

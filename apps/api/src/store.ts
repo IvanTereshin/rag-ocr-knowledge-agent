@@ -96,7 +96,25 @@ export type DocumentChunkRecord = {
   index: number
   text: string
   tokenEstimate: number
+  source?: DocumentChunkSource
+  layout?: DocumentChunkLayout
   createdAt: string
+}
+
+export type DocumentChunkSource = {
+  fileName: string
+  fileType: string
+  page?: number
+  slide?: number
+  sheet?: string
+  table?: string
+  rowRange?: string
+}
+
+export type DocumentChunkLayout = {
+  blockType?: string
+  confidence?: number
+  bbox?: [number, number, number, number]
 }
 
 export type StoreData = {
@@ -209,6 +227,8 @@ type DocumentChunkRow = {
   chunk_index: number
   text: string
   token_estimate: number
+  source: unknown
+  layout: unknown
   created_at: string
 }
 
@@ -329,7 +349,7 @@ export class PostgresStore implements AppStore {
         ORDER BY user_id ASC, position ASC, created_at DESC
       `,
       this.sql<DocumentChunkRow[]>`
-        SELECT id, user_id, document_id, document_name, chunk_index, text, token_estimate, created_at
+        SELECT id, user_id, document_id, document_name, chunk_index, text, token_estimate, source, layout, created_at
         FROM rag_ocr_document_chunks
         ORDER BY document_id ASC, chunk_index ASC
       `,
@@ -419,6 +439,8 @@ export class PostgresStore implements AppStore {
             index: chunk.chunk_index,
             text: chunk.text,
             tokenEstimate: chunk.token_estimate,
+            source: optionalJson<DocumentChunkSource>(chunk.source),
+            layout: optionalJson<DocumentChunkLayout>(chunk.layout),
             createdAt: chunk.created_at,
           },
         ]
@@ -606,11 +628,12 @@ export class PostgresStore implements AppStore {
         for (const chunk of chunks) {
           await sql`
             INSERT INTO rag_ocr_document_chunks (
-              id, user_id, document_id, document_name, chunk_index, text, token_estimate, created_at
+              id, user_id, document_id, document_name, chunk_index, text, token_estimate, source, layout, created_at
             )
             VALUES (
               ${chunk.id}, ${chunk.userId}, ${chunk.documentId}, ${chunk.documentName},
-              ${chunk.index}, ${chunk.text}, ${chunk.tokenEstimate}, ${chunk.createdAt}
+              ${chunk.index}, ${chunk.text}, ${chunk.tokenEstimate}, ${jsonOrNull(sql, chunk.source)},
+              ${jsonOrNull(sql, chunk.layout)}, ${chunk.createdAt}
             )
           `
         }

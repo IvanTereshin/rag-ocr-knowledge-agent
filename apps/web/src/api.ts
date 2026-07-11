@@ -1,3 +1,5 @@
+import { requestCsrfToken } from './csrf'
+
 export type User = {
   id: string
   name: string
@@ -76,6 +78,20 @@ export type AskResponse = {
     chunkIndex: number
     text: string
     score: number
+    source?: {
+      fileName: string
+      fileType: string
+      page?: number
+      slide?: number
+      sheet?: string
+      table?: string
+      rowRange?: string
+    }
+    layout?: {
+      blockType?: string
+      confidence?: number
+      bbox?: [number, number, number, number]
+    }
   }>
 }
 
@@ -85,42 +101,34 @@ type AuthPayload = {
   password: string
 }
 
-type CsrfResponse = {
-  csrfToken: string
-}
-
 const CSRF_METHODS = new Set(['POST', 'PUT', 'DELETE', 'PATCH'])
 const CSRF_EXEMPT_PATHS = new Set(['/api/auth/register', '/api/auth/login'])
 
 let cachedCsrfToken: string | null = null
-let csrfTokenPromise: Promise<string> | null = null
+let csrfTokenPromise: Promise<string | null> | null = null
+let csrfEndpointAvailable: boolean | null = null
+
+function resetCsrfState(): void {
+  cachedCsrfToken = null
+  csrfTokenPromise = null
+  csrfEndpointAvailable = null
+}
 
 function isStateChangingMethod(method?: string): boolean {
   return typeof method === 'string' && CSRF_METHODS.has(method.toUpperCase())
 }
 
-async function fetchCsrfToken(): Promise<string> {
-  const response = await fetch('/api/auth/csrf', {
-    credentials: 'include',
-  })
-
-  const payload = (await response.json().catch(() => ({}))) as Partial<CsrfResponse> & {
-    error?: unknown
-  }
-
-  if (!response.ok) {
-    const message = typeof payload.error === 'string' ? payload.error : 'CSRF endpoint is unavailable'
-    throw new Error(`Не удалось получить CSRF-токен: ${message}`)
-  }
-
-  if (typeof payload.csrfToken !== 'string' || payload.csrfToken.length === 0) {
-    throw new Error('Не удалось получить CSRF-токен: сервер вернул пустой или некорректный ответ')
-  }
-
-  return payload.csrfToken
+async function fetchCsrfToken(): Promise<string | null> {
+  const token = await requestCsrfToken()
+  csrfEndpointAvailable = token === null ? false : true
+  return token
 }
 
-async function getCsrfToken(): Promise<string> {
+async function getCsrfToken(): Promise<string | null> {
+  if (csrfEndpointAvailable === false) {
+    return null
+  }
+
   if (cachedCsrfToken) {
     return cachedCsrfToken
   }
@@ -145,7 +153,9 @@ async function withCsrfHeader(headers: Headers, method: string | undefined, url:
   }
 
   const csrfToken = await getCsrfToken()
-  headers.set('x-csrf-token', csrfToken)
+  if (csrfToken) {
+    headers.set('x-csrf-token', csrfToken)
+  }
   return headers
 }
 
@@ -198,20 +208,29 @@ async function uploadFiles(files: File[] | FileList): Promise<{ documents: UserD
 
 export const api = {
   me: () => requestJson<{ user: User }>('/api/auth/me'),
-  register: (payload: AuthPayload) =>
-    requestJson<{ user: User }>('/api/auth/register', {
+  register: async (payload: AuthPayload) => {
+    const result = await requestJson<{ user: User }>('/api/auth/register', {
       method: 'POST',
       body: JSON.stringify(payload),
-    }),
-  login: (payload: AuthPayload) =>
-    requestJson<{ user: User }>('/api/auth/login', {
+    })
+    resetCsrfState()
+    return result
+  },
+  login: async (payload: AuthPayload) => {
+    const result = await requestJson<{ user: User }>('/api/auth/login', {
       method: 'POST',
       body: JSON.stringify(payload),
-    }),
-  logout: () =>
-    requestJson<{ ok: true }>('/api/auth/logout', {
+    })
+    resetCsrfState()
+    return result
+  },
+  logout: async () => {
+    const result = await requestJson<{ ok: true }>('/api/auth/logout', {
       method: 'POST',
-    }),
+    })
+    resetCsrfState()
+    return result
+  },
   getServices: () => requestJson<{ services: ServiceSettings[]; proxy: ProxySettings }>('/api/settings/services'),
   saveServices: (services: EditableServiceSettings[], proxy: EditableProxySettings) =>
     requestJson<{ services: ServiceSettings[]; proxy: ProxySettings }>('/api/settings/services', {

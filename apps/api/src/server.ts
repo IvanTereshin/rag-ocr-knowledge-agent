@@ -18,11 +18,13 @@ import {
   hashSessionToken,
   maskSecret,
   normalizeEmail,
+  verifySessionTokenHash,
   verifyPassword,
 } from './security.js'
 import { answerQuestion, createPipelineSteps, processDocument, readDocumentText, selectAnswerCandidates } from './pipeline.js'
 import type { RankedChunk } from './pipeline.js'
 import { validateUploadFile } from './upload-validation.js'
+import { createVirusScanConfigFromEnv, scanUploadBuffer } from './virus-scan.js'
 import { createJobQueueFromEnv } from './queue.js'
 import { createSourceObjectStorageFromEnv } from './object-storage.js'
 import { createStoreFromEnv } from './store.js'
@@ -84,6 +86,7 @@ const vectorSearchLimit = parsePositiveInteger(process.env.VECTOR_SEARCH_LIMIT, 
 const store = createStoreFromEnv()
 const jobQueue = createJobQueueFromEnv()
 const sourceStorage = createSourceObjectStorageFromEnv(dataDir)
+const virusScanConfig = createVirusScanConfigFromEnv()
 const proxyAgents = new Map<string, ProxyAgent>()
 const rerankerProviders = ['cohere', 'voyage', 'jina', 'tei'] as const
 type RerankerProvider = (typeof rerankerProviders)[number]
@@ -248,6 +251,8 @@ function publicCitation(chunk: DocumentChunkRecord & { score: number }) {
     chunkIndex: chunk.index,
     text: chunk.text,
     score: chunk.score,
+    source: chunk.source,
+    layout: chunk.layout,
   }
 }
 
@@ -955,9 +960,24 @@ function normalizeOrigin(value: string) {
 }
 
 function requestHost(request: FastifyRequest) {
-  const forwardedHost = headerAsString(request.headers['x-forwarded-host'])
+  const forwardedHost = trustProxy ? headerAsString(request.headers['x-forwarded-host']) : undefined
   const host = forwardedHost ?? request.headers.host
   return host?.split(',')[0]?.trim().toLowerCase()
+}
+
+function requestCanonicalOrigin(request: FastifyRequest) {
+  const host = requestHost(request)
+  if (!host) {
+    return undefined
+  }
+
+  const forwardedProtocol = trustProxy ? headerAsString(request.headers['x-forwarded-proto']) : undefined
+  const protocol = forwardedProtocol?.split(',')[0]?.trim().toLowerCase() || request.protocol
+  try {
+    return normalizeOrigin(`${protocol}://${host}`)
+  } catch {
+    return undefined
+  }
 }
 
 function requestOriginFromHeaders(request: FastifyRequest) {
@@ -998,6 +1018,19 @@ function isTrustedOrigin(origin: string, request: FastifyRequest) {
 
   const originHost = new URL(normalizedOrigin).host.toLowerCase()
   return originHost === requestHost(request)
+}
+
+function isSameOriginRequest(request: FastifyRequest) {
+  const origin = headerAsString(request.headers.origin)
+  if (!origin) {
+    return true
+  }
+
+  try {
+    return normalizeOrigin(origin) === requestCanonicalOrigin(request)
+  } catch {
+    return false
+  }
 }
 
 function applyCorsHeaders(request: FastifyRequest, reply: FastifyReply) {
@@ -1073,7 +1106,7 @@ function csrfValidationError(data: StoreData, request: FastifyRequest) {
     return 'CSRF token was not issued for this session'
   }
 
-  return hashSessionToken(csrfToken) === session.csrfTokenHash
+  return verifySessionTokenHash(csrfToken, session.csrfTokenHash)
     ? undefined
     : 'CSRF token is invalid'
 }
@@ -1088,7 +1121,11 @@ async function main() {
     trustProxy,
     logger: {
       level: appLogLevel,
-      redact: ['req.headers.authorization', 'req.headers.cookie'],
+      redact: [
+        'req.headers.authorization',
+        'req.headers.cookie',
+        `req.headers["${csrfHeaderName}"]`,
+      ],
     },
   })
   app.addHook('onClose', async () => {
@@ -1178,6 +1215,10 @@ async function main() {
   })
 
   app.get('/api/auth/csrf', async (request, reply) => {
+    if (!isSameOriginRequest(request)) {
+      return reply.code(403).send({ error: 'CSRF token is available only to the same origin' })
+    }
+
     const data = await store.read()
     await pruneExpiredSessions(data)
 
@@ -1291,7 +1332,7 @@ async function main() {
       })
     }
 
-    return reply.clearCookie(cookieName, { path: '/' }).send({ ok: true })
+    return reply.clearCookie(cookieName, sessionCookieClearOptions()).send({ ok: true })
   })
 
   app.get('/api/settings/services', async (request, reply) => {
@@ -1418,6 +1459,12 @@ async function main() {
 
       if (!validation.ok) {
         return reply.code(400).send({ error: `${originalName}: ${validation.error}` })
+      }
+
+      const scanResult = await scanUploadBuffer(fileBuffer, virusScanConfig)
+      if (!scanResult.ok) {
+        request.log.warn({ fileName: originalName, scanMessage: scanResult.message }, 'upload rejected by scanner')
+        return reply.code(400).send({ error: `${originalName}: upload rejected by security scan` })
       }
 
       writeFileSync(storagePath, fileBuffer)
@@ -1825,14 +1872,21 @@ function sessionCookieOptions() {
   const secure = process.env.SESSION_COOKIE_SECURE
     ? parseBooleanEnv(process.env.SESSION_COOKIE_SECURE, process.env.NODE_ENV === 'production')
     : process.env.NODE_ENV === 'production'
+  const domain = process.env.SESSION_COOKIE_DOMAIN?.trim() || undefined
 
   return {
     httpOnly: true,
     secure: sameSite === 'none' ? true : secure,
     sameSite,
     path: '/',
+    ...(domain ? { domain } : {}),
     maxAge: Math.floor(sessionTtlMs / 1000),
   }
+}
+
+function sessionCookieClearOptions() {
+  const { maxAge: _maxAge, ...options } = sessionCookieOptions()
+  return options
 }
 
 main().catch((error) => {
